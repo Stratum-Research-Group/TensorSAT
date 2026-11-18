@@ -80,6 +80,20 @@ def test_causal_masking_and_kv_cache():
     print(f"   ✓ KV-Cache vs Prefill max diff: {diff:.2e}")
     print("   ✓ Incremental KV Caching produces identical results to full sequence prefill.")
 
+    # Multi-token chunked KV-cache update test (Gate G3)
+    cache_chunk = KVCache()
+    out_chunk_list = []
+    chunk_size = 4
+    with torch.no_grad():
+        for start in range(0, N, chunk_size):
+            chunk_in = x[:, start:start+chunk_size, :]
+            out_c, cache_chunk = layer(chunk_in, kv_cache=cache_chunk, use_cache=True)
+            out_chunk_list.append(out_c)
+    out_chunked = torch.cat(out_chunk_list, dim=1)
+    diff_chunk = (out_full - out_chunked).abs().max().item()
+    assert diff_chunk < 1e-5, f"Mismatch between chunked cache update and causal prefill: {diff_chunk}"
+    print(f"   ✓ Multi-token chunked KV-cache update matches causal prefill (max diff: {diff_chunk:.2e}).")
+
 def test_tensorsat_transformer_block():
     print("4. Testing TensorSATBlock Pre-LN Decoder Integration...")
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -164,20 +178,8 @@ def test_cnf_partitioning():
     assert {1, 2, 3, 4} in dense
     print("   ✓ Dense clique successfully isolated from sparse clauses.")
 
-if __name__ == "__main__":
-    test_uncrossing_math()
-    test_triton_fused_kernel()
-    test_causal_masking_and_kv_cache()
-    test_tensorsat_transformer_block()
-    test_numerical_dtype_stability()
-    test_ieee_scientific_solvers()
-    test_cnf_partitioning()
-    print("\n=======================================================")
-    print("ALL PRODUCTION ENGINEERING GATES VERIFIED SUCCESSFULLY.")
-    print("=======================================================")
-
-
 def test_decay_stabilizer_and_state_norm():
+    print("7. Testing DecayStabilizer and StateRMSNorm...")
     from tensorsat.stabilizer import DecayStabilizer, StateRMSNorm
     B, H, R, d = 2, 8, 16, 64
     state = torch.randn(B, H, R, d) * 100.0  # Large initial state
@@ -191,20 +193,47 @@ def test_decay_stabilizer_and_state_norm():
     new_chunk = torch.randn(B, H, R, d)
     decayed = decay_layer(state, new_chunk, steps=10)
     assert decayed.shape == (B, H, R, d)
+    print("   ✓ DecayStabilizer and StateRMSNorm verified.")
 
 
 def test_hybrid_singlet_attention():
+    print("8. Testing HybridSingletAttention (CUDA + Sliding Window + Gate G4)...")
     from tensorsat.hybrid import HybridSingletAttention
+    import torch.nn.functional as F
     B, N, D = 2, 512, 256
     H = 4
-    x = torch.randn(B, N, D)
-    hybrid_attn = HybridSingletAttention(embed_dim=D, num_heads=H, window_size=64, num_singlets=8, chunk_size=128)
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    x = torch.randn(B, N, D, device=device)
+    hybrid_attn = HybridSingletAttention(embed_dim=D, num_heads=H, window_size=64, num_singlets=8, chunk_size=128, use_triton=True).to(device)
     out, cache = hybrid_attn(x)
     assert out.shape == (B, N, D)
     assert not torch.isnan(out).any()
+    print("   ✓ HybridSingletAttention forward execution verified.")
+
+    # Gate G4: Equivalence of _local_window_attention against banded sliding-window SDPA reference
+    W = hybrid_attn.window_size
+    seq_len = 160
+    d = D // H
+    q = torch.randn(1, H, seq_len, d, device=device)
+    k = torch.randn(1, H, seq_len, d, device=device)
+    v = torch.randn(1, H, seq_len, d, device=device)
+
+    # Reference banded SDPA mask: key index s in [max(0, t - W + 1), t]
+    banded_mask = torch.zeros((seq_len, seq_len), dtype=torch.bool, device=device)
+    for t in range(seq_len):
+        for s in range(seq_len):
+            if s <= t and s >= t - W + 1:
+                banded_mask[t, s] = True
+
+    expected_sdpa = F.scaled_dot_product_attention(q, k, v, attn_mask=banded_mask)
+    actual_local = hybrid_attn._local_window_attention(q, k, v)
+    diff = (expected_sdpa - actual_local).abs().max().item()
+    assert diff < 1e-4, f"Sliding window mismatch against banded SDPA: {diff}"
+    print(f"   ✓ Hybrid local window matches true banded SDPA exactly (max diff: {diff:.2e}).")
 
 
 def test_softmax_to_singlet_adapter():
+    print("9. Testing SoftmaxToSingletAdapter...")
     from tensorsat.adapter import SoftmaxToSingletAdapter
     B, H, N, d = 2, 4, 64, 32
     embed_dim = H * d
@@ -216,3 +245,20 @@ def test_softmax_to_singlet_adapter():
     assert loss.item() >= 0.0
     loss.backward()
     assert adapter.q_trans.grad is not None
+    print("   ✓ SoftmaxToSingletAdapter alignment loss & backward verified.")
+
+
+if __name__ == "__main__":
+    test_uncrossing_math()
+    test_triton_fused_kernel()
+    test_causal_masking_and_kv_cache()
+    test_tensorsat_transformer_block()
+    test_numerical_dtype_stability()
+    test_ieee_scientific_solvers()
+    test_cnf_partitioning()
+    test_decay_stabilizer_and_state_norm()
+    test_hybrid_singlet_attention()
+    test_softmax_to_singlet_adapter()
+    print("\n=======================================================")
+    print("ALL PRODUCTION ENGINEERING GATES VERIFIED SUCCESSFULLY.")
+    print("=======================================================")

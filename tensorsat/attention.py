@@ -23,16 +23,13 @@ class KVCache:
         self.cached_kv_context: Optional[torch.Tensor] = None
         self.seq_len: int = 0
 
-    def update(self, k: torch.Tensor, v: torch.Tensor, kv_context: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if self.cached_k is None or self.cached_v is None or self.cached_kv_context is None:
-            self.cached_k = k
-            self.cached_v = v
+    def update(self, k: torch.Tensor, v: torch.Tensor, kv_context: torch.Tensor) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], torch.Tensor]:
+        if self.cached_kv_context is None:
             self.cached_kv_context = kv_context
+            self.seq_len = k.shape[2]
         else:
-            self.cached_k = torch.cat([self.cached_k, k], dim=2)
-            self.cached_v = torch.cat([self.cached_v, v], dim=2)
             self.cached_kv_context = self.cached_kv_context + kv_context
-        self.seq_len = self.cached_k.shape[2]
+            self.seq_len += k.shape[2]
         return self.cached_k, self.cached_v, self.cached_kv_context
 
     def reset(self):
@@ -107,11 +104,34 @@ class SingletAttention(nn.Module):
 
         # Autoregressive Generation with KV Cache
         if use_cache and kv_cache is not None:
-            new_kv_context = torch.einsum('bhnr,bhnd->bhrd', K_s, V)
-            all_k, all_v, total_kv_context = kv_cache.update(K, V, new_kv_context)
-            total_seq_len = kv_cache.seq_len
+            start_pos = kv_cache.seq_len
+            prev_context = kv_cache.cached_kv_context
+            if prev_context is None:
+                prev_context = torch.zeros((B, H, self.num_singlets, d), dtype=Q_s.dtype, device=x.device)
 
-            out_global = torch.einsum('bhnr,bhrd->bhnd', Q_s, total_kv_context) / math.sqrt(d * total_seq_len)
+            out_chunk = torch.einsum('bhnr,bhrd->bhnd', Q_s, prev_context)
+            if self.is_causal and N > 1:
+                token_kv_chunk = K_s.unsqueeze(-1) * V.unsqueeze(-2)  # (B, H, N, R, d)
+                causal_intra = torch.cumsum(token_kv_chunk, dim=2)
+                out_intra = torch.einsum('bhnr,bhnrd->bhnd', Q_s, causal_intra)
+                out_chunk = out_chunk + out_intra
+            elif self.is_causal and N == 1:
+                token_kv = torch.einsum('bhnr,bhnd->bhnrd', K_s, V)
+                out_chunk = out_chunk + torch.einsum('bhnr,bhnrd->bhnd', Q_s, token_kv)
+            else:
+                new_kv = torch.einsum('bhnr,bhnd->bhrd', K_s, V)
+                out_chunk = torch.einsum('bhnr,bhrd->bhnd', Q_s, prev_context + new_kv)
+
+            if self.is_causal:
+                pos_norm = torch.sqrt(torch.arange(start_pos + 1, start_pos + N + 1, device=x.device, dtype=x.dtype)).view(1, 1, N, 1) * math.sqrt(d)
+                out_global = out_chunk / pos_norm
+            else:
+                total_seq_len = start_pos + N
+                out_global = out_chunk / math.sqrt(d * total_seq_len)
+
+            chunk_kv_context = torch.einsum('bhnr,bhnd->bhrd', K_s, V)
+            kv_cache.update(K, V, chunk_kv_context)
+
             out = out_global.transpose(1, 2).contiguous().view(B, N, D)
             return self.out_proj(out), kv_cache
 

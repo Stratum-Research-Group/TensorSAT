@@ -9,8 +9,9 @@ from tensorsat.scientific import IEEETensorContractor, GridPoissonSolver
 
 def benchmark_neural_scaling():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    hw_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'
     print("\n" + "=" * 78)
-    print(f"BENCHMARK 1: LLM Neural Attention Scaling (RTX 5060 Ti)")
+    print(f"BENCHMARK 1: LLM Neural Attention Scaling ({hw_name})")
     print("=" * 78)
 
     embed_dim = 512
@@ -24,27 +25,31 @@ def benchmark_neural_scaling():
 
     for N in seq_lengths:
         x = torch.randn(1, N, embed_dim, device=device)
-        torch.cuda.reset_peak_memory_stats()
-        torch.cuda.synchronize()
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+            torch.cuda.synchronize()
 
         # Warmup
         with torch.no_grad():
             _ = layer(x[:, :min(N, 64), :])
-        torch.cuda.synchronize()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
 
         t0 = time.perf_counter()
         with torch.no_grad():
             out, _ = layer(x)
-        torch.cuda.synchronize()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
         elapsed = (time.perf_counter() - t0) * 1000
 
-        peak_mem = torch.cuda.max_memory_allocated() / (1024 * 1024)
+        peak_mem = torch.cuda.max_memory_allocated() / (1024 * 1024) if torch.cuda.is_available() else 0.0
         print(f"{N:<18} | {elapsed:<16.2f} | {peak_mem:<14.1f} | O(N)")
 
 def benchmark_kv_generation():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    hw_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'
     print("\n" + "=" * 78)
-    print("BENCHMARK 2: Autoregressive KV-Cache Throughput (Tokens/Second)")
+    print(f"BENCHMARK 2: Autoregressive KV-Cache Throughput ({hw_name})")
     print("=" * 78)
 
     embed_dim = 512
@@ -60,13 +65,15 @@ def benchmark_kv_generation():
             _, cache = layer(prompt, kv_cache=cache, use_cache=True)
 
         token = torch.randn(1, 1, embed_dim, device=device)
-        torch.cuda.synchronize()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
         t0 = time.perf_counter()
         steps = 100
         for _ in range(steps):
             with torch.no_grad():
                 _, cache = layer(token, kv_cache=cache, use_cache=True)
-        torch.cuda.synchronize()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
         step_time = (time.perf_counter() - t0) / steps * 1000
         tps = 1000.0 / step_time
         print(f"Past Prompt: {P:<6} tokens | Step Latency: {step_time:.3f} ms | Throughput: {tps:.1f} tokens/s")

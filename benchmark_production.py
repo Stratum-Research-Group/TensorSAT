@@ -25,21 +25,24 @@ def benchmark():
 
     for N in seq_lengths:
         x = torch.randn(batch_size, N, embed_dim, device=device)
-        torch.cuda.reset_peak_memory_stats()
-        torch.cuda.synchronize()
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+            torch.cuda.synchronize()
 
         # Warmup
         with torch.no_grad():
             _ = layer(x[:, :min(N, 128), :])
-        torch.cuda.synchronize()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
 
         t0 = time.perf_counter()
         with torch.no_grad():
             out, _ = layer(x)
-        torch.cuda.synchronize()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
         elapsed = (time.perf_counter() - t0) * 1000
 
-        peak_mem = torch.cuda.max_memory_allocated() / (1024 * 1024)
+        peak_mem = torch.cuda.max_memory_allocated() / (1024 * 1024) if torch.cuda.is_available() else 0.0
         print(f"{N:<20} | {elapsed:<15.2f} ms{'':<8} | {peak_mem:<12.1f} MB")
 
     print("\n-------------------------------------------------------")
@@ -52,12 +55,14 @@ def benchmark():
 
     # Measure single-token generation step at context 2048
     new_token = torch.randn(batch_size, 1, embed_dim, device=device)
-    torch.cuda.synchronize()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     t0 = time.perf_counter()
     for _ in range(50):
         with torch.no_grad():
             step_out, cache = layer(new_token, kv_cache=cache, use_cache=True)
-    torch.cuda.synchronize()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     step_latency = (time.perf_counter() - t0) / 50 * 1000
     throughput = 1000.0 / step_latency
     print(f"Per-Token Step Latency: {step_latency:.3f} ms ({throughput:.1f} tokens/sec)")

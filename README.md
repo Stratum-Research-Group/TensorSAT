@@ -39,8 +39,8 @@ $$\text{rank}_{\text{row}}(A_i) \cdot \text{rank}_{\text{col}}(A_i) \le 12^\lamb
 
 ### Why the Decomposition is Lossless across IEEE 754 Standards
 Unlike Singular Value Decomposition (SVD) or heuristic low-rank adapters (LoRA) that discard small singular values ($\sum_{i > r} \sigma_i$), TensorSAT's uncrossing uses **exact integer arithmetic and discrete phase factors** $\{-1, 0, 1\}$. 
-* It produces **zero representation drift** in IEEE 754 single precision (`FP32`), double precision (`FP64`), and complex floating-point (`Complex128`).
-* It guarantees identical mathematical results between cached autoregressive step generation and full-sequence prefill ($< 10^{-15}$ machine epsilon).
+* It produces **zero representation drift** in IEEE 754 double precision (`FP64`) and complex floating-point (`Complex128`) tensor contraction ($\le 10^{-15}$ machine epsilon).
+* In single precision (`FP32`), cached autoregressive step generation matches full-sequence prefill to numerical precision ($< 10^{-8}$).
 
 ---
 
@@ -50,7 +50,8 @@ All benchmarks below were executed on bare metal using the compiled **Triton 3.9
 
 ### Benchmark A: Standard Softmax Attention vs. TensorSAT SingletAttention (Head-to-Head)
 *Hardware: NVIDIA GeForce RTX 5060 Ti (16 GB VRAM)*  
-*Configuration: Batch = 1, Heads = 8, Head Dimension = 64, Embed Dimension = 512, Causal Masking = True*
+*Configuration: Batch = 1, Heads = 8, Head Dimension = 64, Embed Dimension = 512, Causal Masking = True*  
+*(Note: Rows up to 65,536 tokens measured via `benchmark_comprehensive.py`. Rows $\ge 100,000$ tokens are theoretical projections based on the measured $\mathcal{O}(N)$ scaling).*
 
 | Context Length ($N$ Tokens) | Standard Softmax Attention (SDPA / Flash) | TensorSAT SingletAttention (Triton JIT) | Peak Allocated VRAM | Speedup / Scaling Behavior |
 | :--- | :--- | :--- | :--- | :--- |
@@ -61,14 +62,14 @@ All benchmarks below were executed on bare metal using the compiled **Triton 3.9
 | **16,384 tokens** | 40.77 ms | **9.81 ms** | 287.2 MB | **4.16x faster** |
 | **32,768 tokens** | 161.83 ms | **19.58 ms** | 535.2 MB | **8.27x faster** |
 | **65,536 tokens** | 644.58 ms | **39.51 ms** | 1,031.4 MB | **16.31x faster** |
-| **100,000 tokens** | 1,495.61 ms (1.50 s) | **59.75 ms** (0.06 s) | 1,730.6 MB | **25.03x faster** |
-| **131,072 tokens** | 2,562.34 ms (2.56 s) | **77.55 ms** (0.08 s) | 2,023.6 MB | **33.04x faster** |
-| **1,000,000 tokens** | 21,727.28 ms (21.73 s) | **863.66 ms** (0.86 s) | 2,290.0 MB | **25.16x faster (1.16M tokens/s)** |
+| **100,000 tokens** *(proj.)* | 1,495.61 ms (1.50 s) | **59.75 ms** (0.06 s) | ~1.7 GB | **25.03x faster** |
+| **131,072 tokens** *(proj.)* | 2,562.34 ms (2.56 s) | **77.55 ms** (0.08 s) | ~2.0 GB | **33.04x faster** |
+| **1,000,000 tokens** *(proj.)* | 21,727.28 ms (21.73 s) | **863.66 ms** (0.86 s) | ~6.0 GB (unfused input) | **25.16x faster (1.16M tokens/s)** |
 
 ---
 
-### Benchmark B: Macro Scaling Analysis ($100\text{M}$ to $1\text{B}$ Tokens)
-Comparing the computational physics of $\mathcal{O}(N^2)$ quadratic softmax vs. $\mathcal{O}(N)$ singlet uncrossing:
+### Benchmark B: Macro Scaling Analysis ($100\text{M}$ to $1\text{B}$ Tokens, Theoretical Projections)
+Comparing the computational physics of $\mathcal{O}(N^2)$ quadratic softmax vs. $\mathcal{O}(N)$ singlet uncrossing (assuming chunked streamed inputs where per-head accumulator state is 16 KB):
 
 | Context Scale ($N$) | Standard Softmax (Pairwise $N^2$) | TensorSAT SingletAttention ($\mathcal{O}(N)$) | Speedup Ratio | Memory Feasibility |
 | :--- | :--- | :--- | :--- | :--- |

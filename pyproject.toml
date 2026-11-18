@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tensorsat"
-version = "0.1.0"
+version = "0.2.0"
 description = "Planar Tensor-Network Acceleration for SAT and Deep Attention Models via Singlet Uncrossing"
 readme = "README.md"
 requires-python = ">=3.9"

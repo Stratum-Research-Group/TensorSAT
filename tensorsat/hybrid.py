@@ -17,7 +17,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from tensorsat.triton_kernel import triton_singlet_proj
+try:
+    from tensorsat.triton_kernel import triton_singlet_proj
+    HAS_TRITON = True
+except ImportError:
+    HAS_TRITON = False
 from tensorsat.stabilizer import DecayStabilizer, StateRMSNorm
 
 
@@ -62,10 +66,10 @@ class HybridSingletAttention(nn.Module):
 
         # Planar Singlet basis projections
         self.singlet_u = nn.Parameter(
-            torch.randn(num_heads, num_singlets, self.head_dim) * 0.02
+            torch.randn(num_heads, self.head_dim, num_singlets) * 0.02
         )
         self.singlet_v = nn.Parameter(
-            torch.randn(num_heads, num_singlets, self.head_dim) * 0.02
+            torch.randn(num_heads, self.head_dim, num_singlets) * 0.02
         )
 
         # Numerical stabilization
@@ -76,9 +80,9 @@ class HybridSingletAttention(nn.Module):
         self.gate = nn.Parameter(torch.tensor([0.5, 0.5]))
 
     def _project_singlets(self, tensor: torch.Tensor, singlets: torch.Tensor) -> torch.Tensor:
-        if self.use_triton and tensor.is_cuda and tensor.is_contiguous():
+        if self.use_triton and HAS_TRITON and tensor.is_cuda and singlets.is_cuda:
             return triton_singlet_proj(tensor, singlets)
-        return torch.einsum("bhnd,hrd->bhnr", tensor, singlets)
+        return torch.einsum("bhnd,hdr->bhnr", tensor, singlets)
 
     def _local_window_attention(
         self,
@@ -91,38 +95,35 @@ class HybridSingletAttention(nn.Module):
         q, k, v: (B, H, N, d)
         """
         B, H, N, d = q.shape
-        W = min(self.window_size, N)
+        W = self.window_size
 
         if N <= W:
             # If sequence is smaller than window, full causal SDPA is exact and fast
             return F.scaled_dot_product_attention(q, k, v, is_causal=self.is_causal)
 
-        # Chunked sliding-window computation
+        # Chunked sliding-window computation over query blocks of size chunk
+        chunk = min(self.chunk_size, W)
         out_local = torch.zeros_like(q)
-        # Sliding-window causal mask over blocks
-        for i in range(0, N, W):
-            end_i = min(i + W, N)
-            start_ctx = max(0, end_i - W)
-            
+        for i in range(0, N, chunk):
+            end_i = min(i + chunk, N)
+            start_ctx = max(0, i - W + 1) if self.is_causal else max(0, i - W // 2)
+            end_ctx = end_i if self.is_causal else min(N, end_i - 1 + W // 2 + 1)
+
             q_block = q[:, :, i:end_i, :]
-            k_block = k[:, :, start_ctx:end_i, :]
-            v_block = v[:, :, start_ctx:end_i, :]
+            k_block = k[:, :, start_ctx:end_ctx, :]
+            v_block = v[:, :, start_ctx:end_ctx, :]
 
-            # Compute block SDPA
-            q_len = end_i - i
-            kv_len = end_i - start_ctx
-            
-            # Create local causal mask if needed
+            row_idx = torch.arange(i, end_i, device=q.device).unsqueeze(1)
+            col_idx = torch.arange(start_ctx, end_ctx, device=q.device).unsqueeze(0)
+
             if self.is_causal:
-                mask = torch.ones((q_len, kv_len), device=q.device, dtype=torch.bool)
-                # Only attend to j <= i within the window
-                row_idx = torch.arange(i, end_i, device=q.device).unsqueeze(1)
-                col_idx = torch.arange(start_ctx, end_i, device=q.device).unsqueeze(0)
-                mask = col_idx <= row_idx
-                out_b = F.scaled_dot_product_attention(q_block, k_block, v_block, attn_mask=mask)
+                # Each query t attends to keys in [max(0, t - W + 1), t]
+                mask = (col_idx <= row_idx) & (col_idx >= row_idx - W + 1)
             else:
-                out_b = F.scaled_dot_product_attention(q_block, k_block, v_block)
+                half = W // 2
+                mask = (col_idx - row_idx).abs() <= half
 
+            out_b = F.scaled_dot_product_attention(q_block, k_block, v_block, attn_mask=mask)
             out_local[:, :, i:end_i, :] = out_b
 
         return out_local
@@ -137,9 +138,9 @@ class HybridSingletAttention(nn.Module):
         H = self.num_heads
         d = self.head_dim
 
-        Q = self.q_proj(x).view(B, N, H, d).transpose(1, 2)
-        K = self.k_proj(x).view(B, N, H, d).transpose(1, 2)
-        V = self.v_proj(x).view(B, N, H, d).transpose(1, 2)
+        Q = self.q_proj(x).view(B, N, H, d).transpose(1, 2).contiguous()
+        K = self.k_proj(x).view(B, N, H, d).transpose(1, 2).contiguous()
+        V = self.v_proj(x).view(B, N, H, d).transpose(1, 2).contiguous()
 
         # 1. Local Exact Window Representation (Sharp Syntactic & Needle Retrieval)
         out_local = self._local_window_attention(Q, K, V)
