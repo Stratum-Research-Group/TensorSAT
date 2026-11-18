@@ -175,3 +175,44 @@ if __name__ == "__main__":
     print("\n=======================================================")
     print("ALL PRODUCTION ENGINEERING GATES VERIFIED SUCCESSFULLY.")
     print("=======================================================")
+
+
+def test_decay_stabilizer_and_state_norm():
+    from tensorsat.stabilizer import DecayStabilizer, StateRMSNorm
+    B, H, R, d = 2, 8, 16, 64
+    state = torch.randn(B, H, R, d) * 100.0  # Large initial state
+    norm_layer = StateRMSNorm(rank=R, dim=d)
+    normed = norm_layer(state)
+    # Variance along (R, d) should be bounded ~ 1
+    var = torch.mean(normed**2, dim=(-2, -1))
+    assert torch.allclose(var, torch.ones_like(var), atol=1e-2)
+
+    decay_layer = DecayStabilizer(num_heads=H, base_decay=0.99)
+    new_chunk = torch.randn(B, H, R, d)
+    decayed = decay_layer(state, new_chunk, steps=10)
+    assert decayed.shape == (B, H, R, d)
+
+
+def test_hybrid_singlet_attention():
+    from tensorsat.hybrid import HybridSingletAttention
+    B, N, D = 2, 512, 256
+    H = 4
+    x = torch.randn(B, N, D)
+    hybrid_attn = HybridSingletAttention(embed_dim=D, num_heads=H, window_size=64, num_singlets=8, chunk_size=128)
+    out, cache = hybrid_attn(x)
+    assert out.shape == (B, N, D)
+    assert not torch.isnan(out).any()
+
+
+def test_softmax_to_singlet_adapter():
+    from tensorsat.adapter import SoftmaxToSingletAdapter
+    B, H, N, d = 2, 4, 64, 32
+    embed_dim = H * d
+    Q = torch.randn(B, H, N, d)
+    K = torch.randn(B, H, N, d)
+    V = torch.randn(B, H, N, d)
+    adapter = SoftmaxToSingletAdapter(embed_dim=embed_dim, num_heads=H, num_singlets=16)
+    loss = adapter.compute_alignment_loss(Q, K, V)
+    assert loss.item() >= 0.0
+    loss.backward()
+    assert adapter.q_trans.grad is not None
