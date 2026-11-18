@@ -1,0 +1,199 @@
+TENSORSAT REPOSITORY REVIEW - ROUND 1
+Repo: https://github.com/Stratum-Research-Group/TensorSAT
+Commit reviewed: 487c012566e593f30096ee85360791affb70d2af (current remote HEAD, 2026-11-18)
+Reviewed: all 21 files, every module. Read-only; nothing in the repo was changed.
+
+VERDICT
+This is a real, working implementation, not vaporware: the uncrossing identity is exactly
+verified within its tested scope, the chunked linear-attention forward matches stepwise
+decoding to 7.5e-9, and the full test suite passes. The problems are provenance and two
+correctness bugs, not the concept. The README's benchmark tables cannot be reproduced from
+the checked-in code (no script measures standard softmax, none runs past 65,536 tokens, and
+the 1M-token VRAM figure is below the memory floor implied by the stated configuration),
+and the 100M-1B table reads as a linear scaling of the 1M row - provenance unverified.
+Separately, the chunked KV-cache path leaks future tokens (reproduced), the hybrid
+"sliding window" loses all cross-block context (reproduced), and the hybrid Triton path
+cannot run on GPU (static). Fix findings 1-4 before trusting any production claim.
+
+WHAT WAS RUN (this machine, CPU-only, torch 2.9, python 3.12)
+- Full pytest suite at 487c012: 10 passed, 3.09s. Note: the Triton GPU test silently skips
+  without CUDA and still counts as a pass.
+- benchmark_contraction.py (n = 1, 2, 3): uncrossing decomposition matches direct
+  contraction exactly at all three sizes.
+- Repro 1 (cache causality): single-token cache stepping matches causal prefill to 7.5e-9.
+  Multi-token chunked cache update does NOT: it differs from stepwise by 2.6e-3, and
+  perturbing the final token changes earlier tokens' outputs by 12.4 (future leak
+  confirmed).
+- Repro 2 (hybrid window): hybrid local-window output differs from true sliding-window
+  SDPA by up to 1.54 (cross-block context lost).
+- Repro 3 (import with triton unavailable blocked): "import tensorsat" FAILS with
+  ModuleNotFoundError - see finding 12.
+Static analysis only (no GPU here): Triton kernel numerics, hybrid-on-CUDA behavior, and
+all VRAM/latency figures. GPU-dependent items are marked as gates, not conclusions.
+
+FINDINGS (numbered, file:line)
+
+HIGH
+1. Chunked KV-cache update is not causal. attention.py:109-116.
+   In cache mode with more than one new token, the whole chunk's kv_context is added to
+   the running context BEFORE the output is computed, so every token in the chunk attends
+   to its future tokens within the chunk. Normalization also divides every new token by
+   sqrt(d * total_seq_len) (line 114) instead of the per-position sqrt(pos) * sqrt(d)
+   used in prefill (line 144). Single-token generation is unaffected (verified to 7.5e-9),
+   but any multi-token append leaks - including the benchmark's cache priming
+   (benchmark_production.py:51). Fix direction: add the new chunk's causal (cumsum)
+   context to the prior running context, with per-position normalization, instead of
+   adding the whole-chunk sum.
+
+2. The README benchmark tables are not reproducible from this repo, and the 1M VRAM row
+   is below the memory floor of the stated configuration. README.md:51-77.
+   - No script measures standard softmax at all. benchmark_production.py and
+     benchmark_comprehensive.py time only SingletAttention, so the entire
+     "Standard Softmax (SDPA / Flash)" column has no source in the repo.
+   - No script runs past 65,536 tokens (benchmark_production.py:19 max 32,768;
+     benchmark_comprehensive.py:193 max 65,536). The 100,000 / 131,072 / 1,000,000 rows
+     and all of Benchmark B (100M-1B) exceed what the checked-in benchmarks do.
+   - Benchmark B's TensorSAT times read as a linear scaling of the 1M row (86.12s is
+     about 100x the 0.86s 1M figure) rather than independent runs; provenance unverified.
+   - The 1M-token VRAM claim (2,290 MB) is below the memory floor implied by the stated
+     config (B=1, H=8, d=64, D=512): Q, K, V alone are 3 x 2 GB fp32 tensors that coexist
+     through the whole forward pass - a 6 GB floor before singlet projections and the
+     output buffer, already well above the claimed peak. fp16 would halve that and still
+     exceed it. The claimed column also grows roughly linearly through 131,072 tokens
+     (~15.5 KB/token) and then adds only ~267 MB for the next 869,000 tokens, which no
+     single configuration of the checked-in code produces.
+   - "16 KB running state" (Benchmark B) matches only the per-head accumulator
+     (R x d x fp32); the checked-in forward still materializes full Q, K, V for the
+     sequence, so end-to-end memory grows linearly with N (hundreds of GB at 100M tokens
+     in fp32) - the small-state claim does not hold for the code as written.
+   Ask for the benchmark script and config behind these rows, or relabel rows past
+   65,536 as projections.
+
+3. HybridSingletAttention cannot run its Triton path on GPU. hybrid.py:176-181, 190-193
+   vs triton_kernel.py:89-90.
+   singlet_u / singlet_v are stored (H, R, d) but triton_singlet_proj asserts (H, D, R).
+   With the defaults (head_dim 64, num_singlets 16) the assert fails on the first CUDA
+   forward with use_triton=True. Even with matching sizes the layouts are transposed
+   (einsum 'hrd' vs kernel 'hdr'), so results would be wrong, not just rejected.
+   Untested because test_hybrid_singlet_attention runs CPU-only
+   (test_tensorsat.py:196-204).
+
+4. Hybrid "sliding window" loses all cross-block context. hybrid.py:215-238.
+   start_ctx = max(0, end_i - W) equals the block start i for every block after the
+   first, so each block attends only within itself; the effective window collapses to 1
+   token at every block boundary. Verified: output differs from true sliding-window
+   attention by up to 1.54. This contradicts README section 3.1's "100% sharp syntactic
+   and entity recall for immediate tokens". Note the fix needs a per-query banded mask
+   (each query t limited to keys in [t-W+1, t]); merely extending the block context start
+   reintroduces out-of-window keys for later queries in the block.
+
+MEDIUM
+5. The "< 1e-15 machine epsilon" cache/prefill guarantee (README.md:43) is not what the
+   code or tests deliver: test_tensorsat.py:79 asserts diff < 1e-3, and the layer runs
+   fp32 where the verified stepwise diff is 7.5e-9. 1e-15 is fp64 territory. Adjust the
+   claim to the tested tolerance.
+6. The Triton kernel claims enforced IEEE precision but never passes
+   input_precision="ieee" to tl.dot (triton_kernel.py:67-78); Triton defaults to TF32
+   for fp32 tl.dot on tensor-core GPUs, so the comment's guarantee is likely unmet. The
+   kernel output is also hardcoded fp32 (line 92) while the einsum fallback preserves
+   input dtype, so fp16/bf16 inputs take different dtype paths. Needs a GPU check; the
+   test that would catch it skips without CUDA (test_tensorsat.py:40-53).
+7. Generation is O(N) memory traffic per step, not strictly O(1): KVCache
+   re-concatenates the full K and V every token (attention.py:32-33), and those tensors
+   are never read afterward - dead growth that also contradicts the small-running-state
+   framing. The kv_context recurrence itself is O(1); the fix is to stop storing K/V.
+   README Benchmark C's latencies DECREASING with context (0.660 -> 0.226 ms) is not
+   explained by the code.
+8. GridPoissonSolver contains no singlet decomposition (scientific.py:209-228): it is a
+   plain FFT spectral solve despite the "singlet-decomposed boundary decoupling"
+   docstring. It executes and returns an FP64 array of the right shape with the zero
+   mode gauge-fixed, but its numerical correctness against a reference solve was not
+   verified, and the module docstring's "covariance matrix factoring"
+   (scientific.py:140) is not implemented anywhere.
+9. CNF preprocessor drops boundary clauses and does no contraction or counting
+   (cnf_preprocessor.py:100-134): clauses touching any dense variable are removed from
+   sparse_clauses but dense_clusters carry no clauses, so those clauses vanish from the
+   partition. Nothing in the repo performs #SAT or model counting despite the README's
+   headline application claims.
+10. SoftmaxToSingletAdapter is an unproven approximation, not a demonstrated equivalence
+    (adapter.py:63-72, 76-105). The unit-normalization of Q and K discards the
+    magnitudes that softmax scores depend on, so inputs differing only in scale get
+    identical features while their softmax targets differ - exact alignment is
+    unreachable in that case, and ELU(linear)+1 with R features is a Performer-style
+    approximation whose closeness is an empirical question. The repo has no training
+    script or downstream eval for the claimed "alignment in hours";
+    compute_alignment_loss is only a self-consistency objective.
+
+LOW
+11. Version drift: pyproject.toml:225 says 0.1.0, tensorsat/__init__.py:15 says 0.2.0,
+    README advertises v0.2.0 and a dist/ folder (README.md:134) that is not in the repo.
+    (The GitLab clone URL at README.md:166 does resolve to the same HEAD - keep one
+    canonical URL anyway.)
+12. "import tensorsat" fails outright when triton is not installed: hybrid.py:132
+    imports triton_kernel unconditionally (attention.py:8-12 guards its import;
+    hybrid.py does not). Reproduced by blocking triton: ModuleNotFoundError. Masked on
+    CUDA torch wheels, which ship triton as a torch dependency, but it breaks CPU-only
+    torch installs and contradicts triton being an optional [gpu] extra
+    (pyproject.toml:247-250).
+13. Benchmark scripts crash on CPU-only machines: unguarded torch.cuda.* at
+    benchmark_production.py:28-29 and benchmark_comprehensive.py:203; the latter also
+    prints "RTX 5060 Ti" regardless of hardware (line 188).
+14. Test scope vs docstring: test_tensorsat.py:3 claims "4,384 parameter combinations"
+    but test_uncrossing_math checks 16 one-bit cases (the multi-bit identity is covered
+    only by benchmark_contraction.py at n = 1, 2, 3, which passes); the dtype test
+    asserts only no-NaN (lines 105-115); and "10 passed" on CPU includes the GPU test
+    returning early as a pass (lines 40-44).
+15. benchmark_contraction.py duplicates s() and the slice evaluator (lines 70-110)
+    instead of importing from tensorsat.uncrossing - two sources of truth for the core
+    identity.
+16. Hybrid forward accepts kv_cache/use_cache but ignores both and returns None
+    (hybrid.py:242-297): no incremental generation for the hybrid layer despite the
+    README API framing.
+17. "Zero mantissa overflow in FP16/BF16/FP8" (stabilizer.py:107-114) is untested: the
+    hybrid normalizes only the inter-chunk state while the intra-chunk cumsum stays
+    unnormalized, and no fp16/fp8 test exists.
+
+OPEN VALIDATION GATES
+G1. GPU run of the Triton test against a fp64 reference, including the TF32 question
+    (finding 6), and a CUDA run of the hybrid Triton path (finding 3).
+G2. The script and config behind README rows above 65,536 tokens, or relabel them as
+    projections (finding 2).
+G3. A multi-token cache-append causality test (chunked append vs stepwise) added to the
+    suite (finding 1).
+G4. A hybrid-window equivalence test against true banded sliding-window SDPA
+    (finding 4).
+G5. Any end-to-end quality eval (perplexity, needle retrieval) for SingletAttention,
+    Hybrid, and the adapter; none exists (finding 10).
+G6. fp16/bf16/fp8 long-context stability runs (finding 17).
+
+WHAT CHECKS OUT (reproduced here, with tested scope stated)
+- Uncrossing identity exact across all 16 one-bit combinations (test 1), and the
+  singlet decomposition matches direct contraction exactly at n = 1, 2, 3
+  (benchmark_contraction.py). This is verification within those sizes, not a general
+  proof.
+- IEEETensorContractor matches the direct reference sum(W1 * W2.T) to <= 1e-12 in FP64
+  and Complex128 - consistent with README Benchmark D's machine-epsilon claims.
+- Single-token KV-cache stepping matches causal prefill to 7.5e-9 in fp32.
+- GridPoissonSolver executes and returns a gauge-fixed spectral result of the correct
+  shape and dtype (numerical correctness against a reference solve not verified).
+- 10/10 tests pass at 487c012 (CPU).
+- The GitLab install URL resolves to the same commit.
+
+SCOPE AND DO-NOT-TOUCH (for whoever applies fixes)
+- This review was read-only; no repo files were modified.
+- Do not change the verified math core while fixing the above: tensorsat/uncrossing.py
+  (s_factor, eval_slice_A) and the contraction logic in tensorsat/scientific.py
+  (IEEETensorContractor) are exactly verified within the tested scope; fixes to
+  attention.py / hybrid.py should not alter their behavior.
+- Fixes for findings 1, 3, 4 must come with the matching tests in gates G3 and G4;
+  do not close them on code inspection alone.
+- Do not edit the README benchmark tables to match the code; either reproduce them with
+  a checked-in script or relabel them as projections (gate G2).
+
+NOTE ON THE PASTED BENCHMARK
+The numbers pasted earlier today (10.38 ms at 16,384 tokens, 295.4 MB, 524.9
+tokens/sec) differ from the committed README table (9.81 ms, 287.2 MB, up to 4,418.9
+tokens/sec at depth 8,192) but both are consistent with benchmark_production.py /
+benchmark_comprehensive.py runs of the attention LAYER on random tensors. The
+tokens/sec figure is the layer's single-token step rate with a primed cache - not
+full-model LLM generation throughput.
