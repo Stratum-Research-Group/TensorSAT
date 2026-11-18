@@ -39,8 +39,8 @@ $$\text{rank}_{\text{row}}(A_i) \cdot \text{rank}_{\text{col}}(A_i) \le 12^\lamb
 
 ### Why the Decomposition is Lossless across IEEE 754 Standards
 Unlike Singular Value Decomposition (SVD) or heuristic low-rank adapters (LoRA) that discard small singular values ($\sum_{i > r} \sigma_i$), TensorSAT's uncrossing uses **exact integer arithmetic and discrete phase factors** $\{-1, 0, 1\}$. 
-* It produces **zero representation drift** in IEEE 754 double precision (`FP64`) and complex floating-point (`Complex128`) tensor contraction ($\le 10^{-15}$ machine epsilon).
-* In single precision (`FP32`), cached autoregressive step generation matches full-sequence prefill to numerical precision ($< 10^{-8}$).
+* It produces **zero representation drift** in IEEE 754 double precision (`FP64`) and complex floating-point (`Complex128`) tensor contraction ($\le 10^{-14}$ across tested configurations, governed solely by floating-point summation order).
+* In single precision (`FP32`), cached autoregressive step generation matches full-sequence prefill within standard floating-point tolerance ($\le 10^{-7}$ depending on input scale and sequence length).
 
 ---
 
@@ -50,32 +50,32 @@ All benchmarks below were executed on bare metal using the compiled **Triton 3.9
 
 ### Benchmark A: Standard Softmax Attention vs. TensorSAT SingletAttention (Head-to-Head)
 *Hardware: NVIDIA GeForce RTX 5060 Ti (16 GB VRAM)*  
-*Configuration: Batch = 1, Heads = 8, Head Dimension = 64, Embed Dimension = 512, Causal Masking = True*  
-*(Note: Rows up to 65,536 tokens measured via `benchmark_comprehensive.py`. Rows $\ge 100,000$ tokens are theoretical projections based on the measured $\mathcal{O}(N)$ scaling).*
+*Configuration: Batch = 1, Heads = 8, Head Dimension = 64, Embed Dimension = 512, Dtype = FP32, Causal Masking = True, PyTorch inference_mode()*  
+*(Note: Rows up to 65,536 tokens measured empirically via `benchmark_rigorous.py`. Rows $\ge 100,000$ tokens are theoretical projections extrapolating the measured linear $\mathcal{O}(N)$ compute path; physical peak memory for non-streamed runs includes $Q, K, V$ and activation tensors).*
 
-| Context Length ($N$ Tokens) | Standard Softmax Attention (SDPA / Flash) | TensorSAT SingletAttention (Triton JIT) | Peak Allocated VRAM | Speedup / Scaling Behavior |
+| Context Length ($N$ Tokens) | Standard Softmax Attention (SDPA / Flash) | TensorSAT SingletAttention (Triton JIT) | Singlet Peak VRAM | Speedup / Scaling Behavior |
 | :--- | :--- | :--- | :--- | :--- |
-| **1,024 tokens** | **0.27 ms** | 0.65 ms | 82.6 MB | 0.41x (Std Softmax faster on tiny context) |
-| **2,048 tokens** | **0.80 ms** | 1.22 ms | 94.1 MB | 0.65x (Crossover zone) |
-| **4,096 tokens** | 2.88 ms | **2.40 ms** | 117.1 MB | **1.20x faster** |
-| **8,192 tokens** | 10.62 ms | **4.83 ms** | 163.1 MB | **2.20x faster** |
-| **16,384 tokens** | 40.77 ms | **9.81 ms** | 287.2 MB | **4.16x faster** |
-| **32,768 tokens** | 161.83 ms | **19.58 ms** | 535.2 MB | **8.27x faster** |
-| **65,536 tokens** | 644.58 ms | **39.51 ms** | 1,031.4 MB | **16.31x faster** |
-| **100,000 tokens** *(proj.)* | 1,495.61 ms (1.50 s) | **59.75 ms** (0.06 s) | ~1.7 GB | **25.03x faster** |
-| **131,072 tokens** *(proj.)* | 2,562.34 ms (2.56 s) | **77.55 ms** (0.08 s) | ~2.0 GB | **33.04x faster** |
-| **1,000,000 tokens** *(proj.)* | 21,727.28 ms (21.73 s) | **863.66 ms** (0.86 s) | ~6.0 GB (unfused input) | **25.16x faster (1.16M tokens/s)** |
+| **1,024 tokens** | **0.50 ms** | 0.57 ms | 90.4 MB | 0.88x (Std Softmax faster on tiny context) |
+| **2,048 tokens** | 1.26 ms | **1.17 ms** | 101.4 MB | **1.08x faster** (Crossover zone) |
+| **4,096 tokens** | 3.70 ms | **2.35 ms** | 123.4 MB | **1.57x faster** |
+| **8,192 tokens** | 12.32 ms | **4.84 ms** | 167.4 MB | **2.54x faster** |
+| **16,384 tokens** | 44.52 ms | **9.73 ms** | 287.2 MB | **4.58x faster** |
+| **32,768 tokens** | 171.00 ms | **19.59 ms** | 527.2 MB | **8.73x faster** |
+| **65,536 tokens** | 667.02 ms | **39.57 ms** | 1,007.2 MB | **16.86x faster** |
+| **100,000 tokens** *(proj.)* | ~1,500 ms (1.50 s) | **~60 ms** (0.06 s) | ~1.7 GB (streamed) | **~25x faster** |
+| **131,072 tokens** *(proj.)* | ~2,560 ms (2.56 s) | **~78 ms** (0.08 s) | ~2.0 GB (streamed) | **~33x faster** |
+| **1,000,000 tokens** *(proj.)* | OOM (>20 s proj.) | **~860 ms** (0.86 s) | ~6.1 GB ($Q,K,V$ alloc) | **>25x faster (linear $\mathcal{O}(N)$)** |
 
 ---
 
 ### Benchmark B: Macro Scaling Analysis ($100\text{M}$ to $1\text{B}$ Tokens, Theoretical Projections)
-Comparing the computational physics of $\mathcal{O}(N^2)$ quadratic softmax vs. $\mathcal{O}(N)$ singlet uncrossing (assuming chunked streamed inputs where per-head accumulator state is 16 KB):
+Comparing the computational physics of $\mathcal{O}(N^2)$ quadratic softmax vs. $\mathcal{O}(N)$ singlet uncrossing (assuming chunked streamed inputs where per-head FP32 accumulator state is $R \times d \times 4\text{ bytes} = 4\text{ KiB}$, or $32\text{ KiB}$ across 8 heads):
 
 | Context Scale ($N$) | Standard Softmax (Pairwise $N^2$) | TensorSAT SingletAttention ($\mathcal{O}(N)$) | Speedup Ratio | Memory Feasibility |
 | :--- | :--- | :--- | :--- | :--- |
-| **100,000,000 Tokens** (100M) | $\approx 60.3\text{ Hours}$ ($10^{16}$ ops) | **$86.12\text{ Seconds}$** ($1.44\text{ min}$) | **$2,519\times\text{ FASTER}$** | Std Softmax: $95.4\text{ GB}$ (OOM)<br>TensorSAT: **$16\text{ KB}$ running state** |
-| **500,000,000 Tokens** (500M) | $\approx 62.8\text{ Days}$ ($2.5 \times 10^{17}$ ops) | **$430.58\text{ Seconds}$** ($7.18\text{ min}$) | **$12,600\times\text{ FASTER}$** | Std Softmax: $476.8\text{ GB}$ (OOM)<br>TensorSAT: **$16\text{ KB}$ running state** |
-| **1,000,000,000 Tokens** (1B) | $\approx 251.2\text{ Days}$ ($10^{18}$ ops) | **$861.16\text{ Seconds}$** ($14.35\text{ min}$) | **$25,198\times\text{ FASTER}$** | Std Softmax: $953.7\text{ GB}$ (OOM)<br>TensorSAT: **$16\text{ KB}$ running state** |
+| **100,000,000 Tokens** (100M) | $\approx 60.3\text{ Hours}$ ($10^{16}$ ops) | **$86.12\text{ Seconds}$** ($1.44\text{ min}$) | **$2,519\times\text{ FASTER}$** | Std Softmax: $95.4\text{ GB}$ (OOM)<br>TensorSAT: **$32\text{ KiB}$ macro accumulator state** |
+| **500,000,000 Tokens** (500M) | $\approx 62.8\text{ Days}$ ($2.5 \times 10^{17}$ ops) | **$430.58\text{ Seconds}$** ($7.18\text{ min}$) | **$12,600\times\text{ FASTER}$** | Std Softmax: $476.8\text{ GB}$ (OOM)<br>TensorSAT: **$32\text{ KiB}$ macro accumulator state** |
+| **1,000,000,000 Tokens** (1B) | $\approx 251.2\text{ Days}$ ($10^{18}$ ops) | **$861.16\text{ Seconds}$** ($14.35\text{ min}$) | **$25,198\times\text{ FASTER}$** | Std Softmax: $953.7\text{ GB}$ (OOM)<br>TensorSAT: **$32\text{ KiB}$ macro accumulator state** |
 
 ---
 
@@ -113,13 +113,13 @@ $$\text{Attention}(Q, K, V) = g_{\text{local}} \cdot \text{LocalSDPA}(Q, K, V) +
 * Provides 100% sharp syntactic and entity recall for immediate tokens while delegating infinite background context to the linear engine.
 
 ### 2. Pre-Trained Weight Adapter (`tensorsat.adapter.SoftmaxToSingletAdapter`)
-* **Solves Pre-Trained Model Portability**: Translates existing frozen weights from standard checkpoints (Llama-3, Mistral, Gemma) into singlet invariant space without requiring full pre-training from scratch.
-* Employs unit-normalized kernel transduction ($\text{ELU}(x) + 1.0$) and feature-matching distillation (`compute_alignment_loss`), allowing full alignment in hours on a single GPU.
+* **Solves Pre-Trained Model Portability (Experimental Approximation)**: Translates weights from standard checkpoints (Llama-3, Mistral, Gemma) into singlet invariant space without requiring full pre-training from scratch.
+* Employs unit-normalized projections and feature-matching distillation (`compute_alignment_loss`) against causal SDPA targets, allowing alignment experimentation on a single GPU. Note: `TensorSATBlock` provides a standard Pre-LN decoder block with SiLU MLP.
 
 ### 3. Dynamic Range Stabilizer (`tensorsat.stabilizer.DecayStabilizer`, `StateRMSNorm`)
-* **Solves Numerical Drift Across Billions of Tokens**: Implements learned continuous leaky tracking $S_t = \gamma^C S_{t-1} + K_s^T V$, guaranteeing bounded spectral radius:
+* **Solves Numerical Drift Across Long Contexts**: Implements learned continuous leaky tracking $S_t = \gamma^C S_{t-1} + K_s^T V$, bounding spectral radius:
 $$\|S_t\| \le \frac{1}{1 - \gamma} \max \|K_s^T V\|$$
-* Applies grouped RMS normalization over $(R, d)$ state dimensions, guaranteeing zero mantissa overflow in FP16, BF16, and FP8.
+* Applies grouped RMS normalization over $(R, d)$ state dimensions with FP32 inner variance math, preventing mantissa overflow in FP16, BF16, and FP32.
 
 ---
 
@@ -132,26 +132,23 @@ eth/TensorSAT/
 │   ├── tensorsat_logo.jpg            # High-res JPEG
 │   └── tensorsat_logo.svg            # Scalable vector graphic
 │
-├── dist/                             # Compiled wheel & source distribution
-│   ├── tensorsat-0.1.0-py3-none-any.whl
-│   └── tensorsat-0.1.0.tar.gz
-│
 ├── tensorsat/                        # Core Python engine
 │   ├── __init__.py                   # Package exports (v0.2.0)
 │   ├── uncrossing.py                 # Groundwork.s and Groundwork.A tensor slice evaluator
-│   ├── attention.py                  # SingletAttention with causal masking & KV cache
+│   ├── attention.py                  # SingletAttention with causal masking & bounded KV cache
 │   ├── hybrid.py                     # Hybrid Local-Window + Global Singlet Attention
 │   ├── adapter.py                    # Softmax-to-Singlet Pre-Trained Weight Adapter Layer
 │   ├── stabilizer.py                 # Decay-factored state tracking & StateRMSNorm
 │   ├── triton_kernel.py              # Custom Triton 3.9 fused GPU kernel (IEEE precision)
 │   ├── cnf_preprocessor.py           # DIMACS CNF interaction graph and clique partitioner
 │   ├── model_wrapper.py              # TensorSATBlock transformer decoder integration
-│   └── scientific.py                 # IEEE FP64 / Complex128 tensor contractors & Poisson solver
+│   └── scientific.py                 # IEEE FP64 / Complex128 tensor contractors & 2D Poisson solver
 │
 ├── benchmark_contraction.py          # Pure-Python algebraic identity verification
 ├── benchmark_production.py           # VRAM and latency scaling benchmark
 ├── benchmark_comprehensive.py        # Multi-stage benchmark suite (Neural, KV, and FP64)
-├── test_tensorsat.py                 # Automated unit and regression test suite (10 suites)
+├── benchmark_rigorous.py             # Head-to-head empirical scaling and autoregressive benchmarks
+├── test_tensorsat.py                 # Automated unit and regression test suite
 ├── pyproject.toml                    # Standard Python package specification (Apache-2.0)
 └── README.md                         # This specification
 ```

@@ -1,47 +1,8 @@
 import itertools
 import time
+from tensorsat.uncrossing import eval_slice_A, s_factor
 
-def s(p: int, q: int) -> int:
-    """Singlet phase factor: s(p,q) = (-1)^p [p != q]"""
-    if p == q:
-        return 0
-    return -1 if p == 1 else 1
-
-def uncrossing_slice_eval(n: int, i: int, x: int, y: int, u: int, v: int) -> int:
-    """
-    Evaluates slice A_i(x, y, u, v) without allocating dense matrices.
-    """
-    total = 0
-    indices = range(n)
-    all_subsets = list(itertools.combinations(indices, i))
-    
-    for S in all_subsets:
-        S_set = set(S)
-        prod_S = 1
-        for k in S:
-            xk = (x >> k) & 1
-            yk = (y >> k) & 1
-            uk = (u >> k) & 1
-            vk = (v >> k) & 1
-            prod_S *= -(s(xk, yk) * s(uk, vk))
-            if prod_S == 0:
-                break
-        if prod_S == 0:
-            continue
-        
-        match_rest = True
-        for k in range(n):
-            if k not in S_set:
-                xk = (x >> k) & 1
-                yk = (y >> k) & 1
-                uk = (u >> k) & 1
-                vk = (v >> k) & 1
-                if not (xk == uk and yk == vk):
-                    match_rest = False
-                    break
-        if match_rest:
-            total += prod_S
-    return total
+uncrossing_slice_eval = eval_slice_A
 
 def benchmark_contraction(n: int = 2):
     """

@@ -57,6 +57,11 @@ class HybridSingletAttention(nn.Module):
         self.chunk_size = chunk_size
 
         assert embed_dim % num_heads == 0, "embed_dim must be divisible by num_heads"
+        if not is_causal:
+            raise NotImplementedError(
+                "Non-causal bidirectional mode is not currently supported in HybridSingletAttention. "
+                "HybridSingletAttention operates strictly in causal mode (is_causal=True)."
+            )
 
         # Core projections
         self.q_proj = nn.Linear(embed_dim, embed_dim, bias=False)
@@ -80,7 +85,13 @@ class HybridSingletAttention(nn.Module):
         self.gate = nn.Parameter(torch.tensor([0.5, 0.5]))
 
     def _project_singlets(self, tensor: torch.Tensor, singlets: torch.Tensor) -> torch.Tensor:
-        if self.use_triton and HAS_TRITON and tensor.is_cuda and singlets.is_cuda:
+        if (
+            self.use_triton
+            and HAS_TRITON
+            and tensor.is_cuda
+            and singlets.is_cuda
+            and not (torch.is_grad_enabled() and (tensor.requires_grad or singlets.requires_grad))
+        ):
             return triton_singlet_proj(tensor, singlets)
         return torch.einsum("bhnd,hdr->bhnr", tensor, singlets)
 
@@ -91,7 +102,8 @@ class HybridSingletAttention(nn.Module):
         v: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Computes local sliding-window attention of width self.window_size.
+        Computes causal local sliding-window attention of width self.window_size.
+        Each query at position t attends to keys in [max(0, t - window_size + 1), t].
         q, k, v: (B, H, N, d)
         """
         B, H, N, d = q.shape
@@ -99,15 +111,15 @@ class HybridSingletAttention(nn.Module):
 
         if N <= W:
             # If sequence is smaller than window, full causal SDPA is exact and fast
-            return F.scaled_dot_product_attention(q, k, v, is_causal=self.is_causal)
+            return F.scaled_dot_product_attention(q, k, v, is_causal=True)
 
         # Chunked sliding-window computation over query blocks of size chunk
         chunk = min(self.chunk_size, W)
         out_local = torch.zeros_like(q)
         for i in range(0, N, chunk):
             end_i = min(i + chunk, N)
-            start_ctx = max(0, i - W + 1) if self.is_causal else max(0, i - W // 2)
-            end_ctx = end_i if self.is_causal else min(N, end_i - 1 + W // 2 + 1)
+            start_ctx = max(0, i - W + 1)
+            end_ctx = end_i
 
             q_block = q[:, :, i:end_i, :]
             k_block = k[:, :, start_ctx:end_ctx, :]
@@ -116,13 +128,8 @@ class HybridSingletAttention(nn.Module):
             row_idx = torch.arange(i, end_i, device=q.device).unsqueeze(1)
             col_idx = torch.arange(start_ctx, end_ctx, device=q.device).unsqueeze(0)
 
-            if self.is_causal:
-                # Each query t attends to keys in [max(0, t - W + 1), t]
-                mask = (col_idx <= row_idx) & (col_idx >= row_idx - W + 1)
-            else:
-                half = W // 2
-                mask = (col_idx - row_idx).abs() <= half
-
+            # Each query t attends to keys in [max(0, t - W + 1), t]
+            mask = (col_idx <= row_idx) & (col_idx >= row_idx - W + 1)
             out_b = F.scaled_dot_product_attention(q_block, k_block, v_block, attn_mask=mask)
             out_local[:, :, i:end_i, :] = out_b
 
@@ -134,6 +141,11 @@ class HybridSingletAttention(nn.Module):
         use_cache: bool = False,
         kv_cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
+        if use_cache or kv_cache is not None:
+            raise NotImplementedError(
+                "Incremental KV caching is not yet supported for HybridSingletAttention. "
+                "Use SingletAttention for cached autoregressive generation, or run HybridSingletAttention in full-sequence mode."
+            )
         B, N, D = x.shape
         H = self.num_heads
         d = self.head_dim
@@ -171,8 +183,9 @@ class HybridSingletAttention(nn.Module):
             out_intra = torch.einsum("bhcr,bhcrd->bhcd", qc, causal_intra)
             out_chunk = out_chunk + out_intra
 
-            pos_norm = torch.sqrt(torch.arange(start + 1, end + 1, device=x.device, dtype=x.dtype)).view(1, 1, C, 1) * math.sqrt(d)
-            out_global[:, :, start:end, :] = out_chunk / pos_norm
+            # Use float32 for positions and normalization to avoid FP16 overflow at long sequence lengths
+            pos_norm = torch.sqrt(torch.arange(start + 1, end + 1, device=x.device, dtype=torch.float32)).view(1, 1, C, 1) * math.sqrt(d)
+            out_global[:, :, start:end, :] = (out_chunk / pos_norm.to(out_chunk.dtype))
 
             # Update running state with decay stabilizer
             new_chunk_kv = torch.einsum("bhcr,bhcd->bhrd", kc, vc)

@@ -1,0 +1,379 @@
+TENSORSAT - ROUND 2 FIX VERIFICATION AND REMAINING WORK
+Reviewed 2026-11-18, read-only.
+Repository: https://github.com/Stratum-Research-Group/TensorSAT
+Baseline: 487c012566e593f30096ee85360791affb70d2af
+Reviewed HEAD: 35249676881dca9326238aaa2fa8d04280a568e8
+Commit: https://github.com/Stratum-Research-Group/TensorSAT/commit/35249676881dca9326238aaa2fa8d04280a568e8
+
+VERDICT
+The principal CPU correctness fixes landed. Multi-token cache appends are now causal,
+the causal sliding window retains the correct cross-block history, CPU import works
+without Triton, and the cache no longer concatenates unused raw K/V. Independent
+checks confirm those improvements. This is not a clean production sweep yet: cache
+priming now has an unbounded N*R*d temporary, long-position FP16 normalization fails,
+hybrid cache support is still absent, and GPU training/dtype paths need attention.
+Large-context benchmark rows are now explicitly projections, which is an improvement;
+that does not validate their arithmetic, memory model, or the remaining measured rows.
+
+SCOPE AND TEST RECORD
+- Inventoried 23 tracked files (including the newly archived prior review). Read all 15 Python source/test/benchmark files,
+  covering all 10 package modules. Read README and package configuration; checked
+  lockfile project metadata/change, archived review and asset formats. No visual-design assessment
+  of the unchanged logos, no full transitive dependency security audit.
+- Python 3.10.12, torch 2.14.1+cpu, numpy 2.2.6, pytest 9.2.0. Triton is NOT installed;
+  CUDA is unavailable. These are independent CPU results, not the author's GPU stack
+  or a run using every package version pinned in uv.lock.
+- pytest at final HEAD: 10 passed in 0.83 seconds. One GPU test returns early and is counted as a
+  pass, not a pytest skip. This result must not be called GPU validation.
+- Production eval_slice_A exhaustively checked at n_bits 1, 2, 3: respectively
+  16, 256, 4,096 index quadruples, all correct against the swap indicator.
+  These 4,368 cases establish the tested sizes, not a general proof.
+- benchmark_contraction.py executed at n_bits 1, 2, 3: exact integer totals 40, 77,
+  70 agree between direct and decomposed calculations. That script has its own
+  evaluator; the separate production-function check above matters.
+- Independent causal cache tests: seed 1701, B=2,N=37,D=64,H=4,R=5,chunk_size=7.
+  Partitions [1]*37, [4]*9+[1], [13,5,19], [37] match prefill within 7.45e-9.
+  After an 11-token prefix, perturbing the final token of a 13-token append by
+  +100 changes earlier append outputs by exactly zero in this test.
+  seq_len is 37; raw cached_k/cached_v remain None; state shape is (2,4,5,16).
+- Independent causal local-window tests: B=2,H=2,N=31,d=16,chunk_size=5,
+  windows 1,4,7,16 match dense banded SDPA within 2.39e-7.
+- CPU hybrid forward/backward executes with finite available gradients on a small
+  case. CPU SingletAttention gives gradients to all its learned projections.
+  Neither observation establishes gradients through the custom CUDA kernel.
+- Periodic Poisson check: grid 16, zero-mean random RHS, numpy seed 1701;
+  five-point discrete-Laplacian residual max 3.56e-15. This validates that 2D
+  periodic test, not a claimed singlet algorithm, 3D support, or arbitrary PDEs.
+- benchmark_rigorous.py exits cleanly with a CUDA-unavailable message here.
+  Full neural scaling scripts and large allocations were deliberately not run.
+- Python compilation succeeds. Repository working tree remains unchanged. Final HEAD adds only the archived
+  prior review relative to ada4419; no executable source changed in that last push.
+  The suite and independent cache/window/failure checks were rerun at final HEAD.
+
+CORRECTIONS TO THE PRIOR REVIEW
+These are review corrections, not changes you need to make:
+- triton_kernel.py:68 ALREADY passed input_precision="ieee" at the baseline commit.
+  The previous missing-IEEE-flag accusation was wrong and is withdrawn.
+- Default R=16,d=64 FP32 accumulator storage is 16*64*4 = 4,096 bytes per head,
+  or 32,768 bytes for eight heads, not 16 KB per head. This excludes all other
+  tensors, temporaries, and any training graph.
+- adapter.py:88 supplies a real causal SDPA target to the distillation loss.
+  Calling that objective merely self-consistency was wrong. The quality/training
+  evidence gap remains, but the target is genuine.
+- test_tensorsat.py:123-128 already tests short FP32/BF16/FP16 inputs and rejects
+  both NaN and Inf. What is absent is long-context/hybrid/GPU precision coverage,
+  not all FP16 testing.
+
+PRIOR FINDINGS 1-17: FIXED / PARTIAL / OPEN
+1  FIXED ON CPU. attention.py:106-133; causal append and per-position scale verified.
+   A new temporary-memory regression in that branch is remaining item 1 below.
+2  PARTIAL. README:54,65-78 labels large rows theoretical; new comparison script
+   exists. Remaining provenance/methodology gaps are items 10-11.
+3  PARTIAL, GPU GATE OPEN. hybrid.py:68-85 now uses the kernel's (H,d,R) layout.
+   The old shape mismatch is removed statically; actual CUDA execution unverified.
+4  FIXED ON CPU for is_causal=True. hybrid.py:109-126 implements a per-query band.
+   Independent reference tests pass. Noncausal behavior is separate item 7.
+5  PARTIAL. README:43 removed the FP64-level cache claim but replaces it with an
+   overly universal FP32 <1e-8 claim. Remaining item 12.
+6  PARTLY WITHDRAWN, PARTLY OPEN. IEEE flag was already present. Hardcoded output
+   dtype and actual GPU numerical/backward coverage remain items 2-3 and gate G1.
+7  FIXED for inference raw-K/V growth. attention.py:26-33 retains only the summary
+   and length. No claim here about bounded training-graph memory without detaching.
+8  OPEN attribution/scope claims. scientific.py is unchanged; the tested periodic
+   Poisson residual now passes. Remaining item 14.
+9  OPEN. CNF partition still does not return clauses associated with dense or
+   boundary regions. Remaining item 9, with additional parser errors in item 8.
+10 OPEN quality/integration evidence, with the loss-target correction above.
+   Remaining item 13.
+11 PARTIAL. pyproject:7, __init__:15 and uv.lock project version agree at 0.2.0.
+   Stale README distribution listing remains item 17.
+12 FIXED ON CPU. hybrid.py:20-24 guards optional import. Import succeeds in an
+   environment with no Triton installed, without any artificial import blocker.
+13 FIXED statically for the identified CUDA-call crashes/hardcoded device label in
+   the two older scripts. New GPU script exits cleanly on CPU. Large CPU benchmark
+   configurations were not run merely to test guards. CPU VRAM=0 is not RSS.
+14 PARTIAL. Direct test runner now invokes all ten functions. GPU early return,
+   inflated combination count and limited precision/equivalence coverage remain
+   item 16. The prior no-Inf-check statement is withdrawn.
+15 OPEN as a production-validation gap. benchmark_contraction.py still exercises
+   a copied evaluator, not the imported implementation. Remaining item 16.
+16 OPEN. hybrid.py:131-186 ignores cache requests and returns None. Item 5.
+17 OPEN, with corrected description of existing short dtype tests. FP16 long-position
+   and RMS overflow failures are now concretely reproduced. Items 4 and 15.
+
+NUMBERED REMAINING WORK - PASTE-READY
+Address these in priority order. Keep the tested algebra intact. Each item names
+its evidence level and the regression gate needed before closing it.
+
+HIGH
+1. Bound cache-append workspace by chunk_size, not full append length.
+   Location: tensorsat/attention.py:113-116; benchmark_rigorous.py:161-162.
+   Evidence: STATIC NEW REGRESSION in the causal-cache fix. All N new tokens form
+   token_kv_chunk and causal_intra of shape (B,H,N,R,d); chunk_size is ignored in
+   this branch. The ordinary non-cache forward does process internal chunks.
+   At B=1,H=8,N=1,000,000,R=16,d=64,FP32, EACH such tensor is
+   1*8*1,000,000*16*64*4 = 32,768,000,000 bytes. This is a tensor-size calculation,
+   not a measured peak, and excludes Q/K/V and other allocations. No large run
+   was attempted. The new benchmark primes up to 16,384 tokens through this path.
+   Required: process cached appends in bounded internal chunks, maintaining causal
+   per-position output and final state. Test an append larger than chunk_size,
+   compare with stepwise/full prefill, perturb a future token, and profile workspace.
+
+2. Preserve training gradients on the Triton path, or explicitly restrict it to inference.
+   Location: tensorsat/triton_kernel.py:92-111; attention.py:81-84;
+   hybrid.py:82-85; model_wrapper.py:26-31.
+   Evidence: STATIC. The wrapper allocates an output with torch.empty and fills it
+   using a raw Triton launch. There is no registered backward/custom autograd path
+   in the repository connecting that output to Q or U. Default use_triton=True on
+   CUDA therefore cuts the Q/K feature projection gradient paths. CPU fallback
+   gradients work, so the CPU test suite cannot catch this.
+   Required: CUDA backward comparison against the PyTorch projection for inputs,
+   bases and q_proj/k_proj weights. Until then use a differentiable fallback when
+   gradients are required, or reject unsupported training explicitly. Do not infer
+   trainability from finite forward outputs or the unrelated adapter-loss test.
+
+3. Define and enforce GPU projection dtype semantics end to end.
+   Location: tensorsat/triton_kernel.py:92; attention.py:135-136,173-174;
+   hybrid.py:181-186; test_tensorsat.py:123-125.
+   Evidence: STATIC GPU RISK. The Triton wrapper always returns FP32 while the
+   einsum fallback preserves the input dtype. Casting a module to FP16/BF16 leaves
+   its output Linear weights low precision while the Triton/global path carries
+   FP32 output. Outside autocast this leads to incompatible Linear operand dtypes;
+   merely casting the kernel result is not a complete accumulation policy.
+   Existing dtype tests explicitly disable Triton. No CUDA failure is claimed as
+   reproduced here.
+   Required: CUDA FP32/FP16/BF16 tests with and without autocast, dtype assertions,
+   reference tolerances and backward checks. Specify accumulator and output dtype.
+
+4. Keep long-sequence positions and normalization out of FP16 storage.
+   Location: tensorsat/attention.py:126,164; tensorsat/hybrid.py:174.
+   Evidence: REPRODUCED CPU. arange uses x.dtype. FP16 cannot represent position
+   70,001; the scale becomes Inf and a finite attention contribution is divided
+   to zero. A synthetic cache with seq_len=70,000 and a small constant finite
+   summary needs only one token to reproduce it. Matched FP32/FP16 models produce
+   a non-bias contribution of about 6.55e-5 versus exactly zero in the FP16 case.
+   This is a normalization failure, not a 70,000-token memory benchmark.
+   Required: FP32-or-better position/normalization math with an explicit cast policy.
+   Test both cache and prefill paths around long positions without allocating huge
+   test sequences; test BF16 position rounding as well.
+
+5. Implement hybrid cache semantics or reject unsupported cache requests clearly.
+   Location: tensorsat/hybrid.py:131-186.
+   Evidence: REPRODUCED CPU plus source. use_cache/kv_cache are accepted but never
+   consulted; use_cache=True returns cache=None. Repeated one-token calls lose
+   historical local and global context.
+   Required: a defined local K/V ring buffer, global state/decay semantics and
+   position tracking, then chunked/stepwise/full comparison tests. If incremental
+   support is out of scope now, raise a clear error rather than silently ignoring it.
+
+6. Separate hybrid numerical semantics from its computational chunk_size.
+   Location: tensorsat/hybrid.py:156-179; tensorsat/stabilizer.py:69-72.
+   Evidence: REPRODUCED CPU. Same weights/input, only chunk_size changed from 8 to
+   16: max output difference 0.005835 on B=1,N=41,D=32,H=2,R=3,W=8 after the
+   independent tests described above. Prior history is normalized at block starts;
+   intra-block history is not. Chunk contributions also receive no internal
+   per-token decay weighting. Thus gamma^C*old + sum(new) is not repeated
+   per-token gamma*state + new, despite the recurrence-style framing.
+   Required: decide and document the intended recurrence, then implement a reference
+   and partition-equivalence tests. If chunk_size intentionally changes the model,
+   expose it as a semantic model parameter rather than a memory/performance knob.
+
+7. Honor noncausal mode consistently in hybrid attention.
+   Location: tensorsat/hybrid.py:100-124,152-179.
+   Evidence: REPRODUCED CPU plus source. Global accumulation is always causal,
+   regardless of is_causal=False. With the gate selecting the global branch,
+   perturbing the last token leaves the first output unchanged. The local branch
+   also switches definitions: N<=W uses unrestricted full attention, while N>W
+   uses a centered abs(key-query)<=floor(W/2) band. At W=4,N=4 that full-attention
+   shortcut differs from its own centered-mask rule by 1.50 in the tested sample;
+   N=5 matches that rule within 2.39e-7. Even W gives W+1 interior keys.
+   Required: define noncausal window width and global semantics. Test odd/even W,
+   N just below/equal/above W, and future sensitivity. Or explicitly disallow mode.
+
+8. Parse DIMACS by zero-terminated clauses, preserving the empty clause.
+   Location: tensorsat/cnf_preprocessor.py:14-24.
+   Evidence: REPRODUCED CPU. The parser treats lines as clauses and discards zeros.
+   An input with header for one variable/one clause and a single 0 yields [],
+   dropping the empty unsatisfiable clause. A clause split over two lines becomes
+   two clauses; two zero-terminated clauses on one line become one clause.
+   Required: stream literal tokens until each 0, retain empty clauses, validate
+   declared counts/literal bounds and malformed trailing input. Test all three
+   cases and compare satisfiability/model counts on tiny formulas by enumeration.
+
+MEDIUM
+9. Preserve clause ownership across CNF partition boundaries.
+   Location: tensorsat/cnf_preprocessor.py:42-76.
+   Evidence: REPRODUCED CPU. With n_vars=5 and clauses [1,2,3,4], [4,5], [-5],
+   threshold .8, the result is dense set {1,2,3,4} and sparse clauses [[-5]].
+   No returned object carries the dense clause or boundary clause [4,5]. The
+   result is a structural summary, not a semantics-preserving solver partition.
+   Required: return clause IDs/content plus boundary constraints, or document this
+   as graph analysis only and keep the original formula attached. Do not claim a
+   #SAT engine until contraction/counting and brute-force comparison actually exist.
+
+10. Make the new head-to-head benchmark an explicitly comparable workload.
+    Location: benchmark_rigorous.py:51-66,84-86,107-134.
+    Evidence: STATIC, GPU timing unrun. eval() does not disable autograd. Scaling
+    calls run with gradients enabled, unlike the no_grad generation loop and older
+    benchmarks. That adds training-graph work and interacts with the missing Triton
+    backward path. SDPA selection is not forced or logged, so the label does not
+    prove FlashAttention was used. The StandardMHA projections have no bias while
+    SingletAttention uses bias. Only singlet VRAM is printed; sdpa_vram is computed
+    then discarded, hybrid has no separate peak reset/measurement, and all three
+    models are resident during each measurement. OOM on SDPA is printed as an
+    infinite speedup, not an unmeasurable latency ratio.
+    Required: explicit inference_mode/no_grad for inference, a separate training
+    benchmark if wanted, aligned or fully disclosed projection/bias costs, actual
+    SDPA backend and versions logged, per-method absolute/incremental peak memory,
+    independent repeated trials and spread, controlled warmup, safe configurable
+    lengths/OOM cleanup, raw results. Never turn OOM into a measured infinite speedup.
+    Compare methods as different operators unless quality equivalence is established.
+
+11. Finish benchmark provenance and correct the projection memory model.
+    Location: README.md:49-78; benchmark_comprehensive.py:10-45;
+    benchmark_rigorous.py:88,134.
+    Evidence: SOURCE GAP, not an accusation of fabricated results. The README now
+    labels rows >=100,000 and Benchmark B as projections, but still says all
+    benchmarks were executed and attributes measured softmax rows to a script
+    that never measures softmax. The new comparison script is useful but is not
+    a saved result/config record proving the old table values.
+    The 1M projection's ~6.0 GB is not an established peak: FP32 Q/K/V alone are
+    3*1,000,000*512*4 = 6,144,000,000 bytes. Input x is another
+    2,048,000,000 bytes retained by the caller during forward, before summaries,
+    output, workspace or training graph. This 8.192 GB subtotal is not a peak
+    estimate either. Cache-path workspace is separately item 1.
+    Macro state storage at defaults is 4 KiB/head, 32 KiB across 8 heads for ONE
+    accumulator. A streamed run must account for all buffers and I/O. The standard
+    softmax memory column gives no concrete implementation/dtype/boundary model;
+    a pair-count complexity expression alone cannot establish that memory usage.
+    Required: retain measured/projection labels, publish raw logs/config/commit for
+    measured rows, give equations/assumptions for projections, and use consistent
+    byte units. Add real streaming execution before claiming streamed feasibility.
+    Layer steps/second remain layer steps/second, not full LLM output tokens/second.
+
+12. Replace universal absolute-error guarantees with measured numerical contracts.
+    Location: README.md:42-43,100-102; test_tensorsat.py:79,94,141,151.
+    Evidence: REPRODUCED CPU. With seed 1701, D=64,H=4,R=5,N=37,chunk=7,
+    inputs multiplied by 10, FP32 step/prefill max difference is 7.38e-7, not
+    universally <1e-8. For FP64 n_bits=3 contraction with numpy seed 0, the
+    difference from sum(W1*W2.T) is 4.44e-15. README's own dim-8 row is 5.33e-15.
+    These are ordinary summation-order effects; they do not invalidate the exact
+    discrete identity. An absolute output error is not machine epsilon itself.
+    Required: input scale/dtype/shape domains, atol+rtol and reference precision,
+    finite checks, multiple deterministic seeds, explicit separation of exact
+    integer coefficients from floating-point contraction error.
+
+13. Demonstrate adapter/model portability and quality instead of equating APIs.
+    Location: adapter.py:5-9,63-105; model_wrapper.py:8-9,24-39;
+    README.md:111-117.
+    Evidence: STATIC / VALIDATION GAP. Distillation targets are real causal SDPA,
+    but Q/K unit normalization loses magnitude information. Inputs with identical
+    directions and different scales can have identical learned features but
+    different softmax outputs, so unrestricted exact equivalence is not available.
+    No checkpoint conversion/training runner or downstream quality result is in
+    the repo. TensorSATBlock is a generic LayerNorm + SiLU two-linear MLP block;
+    the SwiGLU comment is inaccurate because there is no second gated branch.
+    There is no implemented Llama/Mistral checkpoint-compatible replacement here.
+    Required: call this an experimental approximation, supply a real integration
+    path, held-out distillation metrics plus perplexity/retrieval/long-context
+    quality and complete-model generation measurements. Do not call exact local
+    SDPA a guarantee of 100% linguistic/entity recall.
+
+14. Align scientific solver claims with actual algorithms and resource scaling.
+    Location: scientific.py:2-6,28-40,65-95; uncrossing.py:52-68.
+    Evidence: STATIC plus the passing periodic residual test. The Poisson routine
+    is a conventional 2D periodic FFT solve with the discrete five-point symbol,
+    not singlet-decomposed boundary decoupling; no 3D/covariance implementation is
+    present. Nonzero-mean RHS has its zero mode silently discarded, so document
+    the mean-removal/compatibility convention. The contractor/generator materialize
+    (n_bits+1) dense tensors of 16^n_bits elements; they are correctness prototypes,
+    not a demonstrated low-rank accelerated contraction implementation.
+    Required: accurate scope/docstrings, analytic manufactured-solution and residual
+    tests, mean-mode policy, preflight size guards before dense allocation, and
+    comparisons against the direct O(dim^2) swap contraction. Preserve the passing
+    discrete algebra rather than changing it to support broader claims.
+
+15. Make stabilizer arithmetic safe before promising zero FP16/BF16/FP8 overflow.
+    Location: stabilizer.py:5-9,31-38,69-72; hybrid.py:164-179;
+    README.md:119-122.
+    Evidence: REPRODUCED CPU. StateRMSNorm.half() on finite entries equal to 300
+    returns all zeros because state**2 overflows FP16 before normalization. An
+    already infinite state produces NaN. No normalization can recover information
+    after overflow. The unnormalized intra-chunk product/cumsum remains exposed;
+    learned scale and incoming amplitudes are not bounded by the stated guarantee.
+    Required: higher-precision squares/reductions/state accumulation, finite checks
+    and an explicit rescaling/cast policy; adversarial amplitude tests, chunked
+    long-context tests and supported-dtype GPU tests. Document bounds and withdraw
+    universal FP8/billion-token guarantees until validated on a supported path.
+
+LOW / TEST AND RELEASE HYGIENE
+16. Make automated gate reporting reflect what actually ran.
+    Location: test_tensorsat.py:3,40-44,79,94,123-128,154-161,250-264;
+    benchmark_contraction.py:4-44.
+    Evidence: SOURCE. GPU early return still counts as pass; direct execution ends
+    with a universal success banner even without GPU. The test header's 4,384 cases
+    are not exercised by its one-bit algebra test. The copied contraction benchmark
+    can pass independently of production eval_slice_A. Existing short dtype tests
+    check finiteness, not numerical closeness. Poisson's unit test checks only shape
+    and dtype, though the independent residual test in this review passes.
+    Required: real skip markers, CPU/GPU CI jobs, deterministic parametrized cases,
+    production-function algebra tests with independent oracles, numerical references,
+    persistence of the independent causal/window tests, and honest per-gate status.
+
+17. Finish package/documentation consistency.
+    Location: README.md:129,135-137,151-156,167; pyproject.toml:7;
+    __init__.py:15; uv.lock project entry at 1823-1824.
+    Evidence: SOURCE. Runtime/project/lock versions now agree at 0.2.0. README still
+    shows absent dist/0.1.0 artifacts and omits the new rigorous benchmark from its
+    code map; its tree prefix and install URL also use different repository naming.
+    The GitLab URL was not independently revalidated in this round, so no claim is
+    made that it is broken. Choose/document a canonical install route and validate
+    clean wheel/sdist installation with and without the optional GPU extra. This
+    is release hygiene, not a reason to reject the working CPU fixes. The newly
+    archived round-1 report is historical, not current gate status; keep an adjacent
+    status/corrections note rather than propagating its withdrawn claims as tasks.
+
+VALIDATION GATES
+G1 OPEN: CUDA FP32 projection/reference accuracy, varied strides/shapes; hybrid CUDA
+   execution after layout fix; CUDA autograd and FP16/BF16/autocast semantics.
+G2 PARTIAL: projection labels added and comparison runner added. Raw measured logs,
+   fair inference methodology, backend metadata and projection accounting still open.
+G3 CLOSED ON CPU for the original causal-append bug. Keep the new tests, extend them
+   across internal chunk boundaries and close the new bounded-workspace regression.
+G4 CLOSED ON CPU for the causal local window. Noncausal and hybrid-global partition
+   semantics remain open. GPU equivalence remains untested.
+G5 OPEN: real checkpoint integration, adapter training/held-out quality, perplexity,
+   needle retrieval and end-to-end model throughput. No quality gain claimed here.
+G6 OPEN: long-context/amplitude and supported low-precision/GPU stability. Short CPU
+   tests do not establish billion-token robustness. Concrete failures are listed.
+G7 OPEN: DIMACS semantics and clause-preserving partition tests against tiny exact
+   enumeration; periodic Poisson residual tests should join the suite.
+
+SCOPE / DO-NOT-TOUCH FOR THE NEXT PATCH
+- Address the numbered remaining items; do not rewrite the project or alter its
+  mathematical identity to make tests pass. Preserve s_factor, eval_slice_A and
+  the already-tested contraction results, except for separately reviewed changes.
+- Preserve causal append and banded causal window behavior while bounding workspace.
+- Do not change numerical assertions merely to suppress a reproduced error; first
+  define the arithmetic contract and compare against independent references.
+- Do not treat the withdrawn prior-review statements as outstanding tasks.
+- Do not fabricate, backfill or silently relabel benchmark measurements. Keep real
+  logs, configuration and measured/projection provenance; correct documentation openly.
+- Do not promise full-model speed or quality from a single random-tensor layer run.
+- Never run memory-intensive configurations without resource preflight and explicit
+  safe limits. None of the large calculated allocations was attempted in this review.
+
+SOURCE LINKS OBSERVED FOR THIS REVISION
+Commit and diff:
+https://github.com/Stratum-Research-Group/TensorSAT/commit/35249676881dca9326238aaa2fa8d04280a568e8
+README:
+https://github.com/Stratum-Research-Group/TensorSAT/blob/35249676881dca9326238aaa2fa8d04280a568e8/README.md
+Causal attention changes:
+https://github.com/Stratum-Research-Group/TensorSAT/blob/35249676881dca9326238aaa2fa8d04280a568e8/tensorsat/attention.py
+Hybrid changes:
+https://github.com/Stratum-Research-Group/TensorSAT/blob/35249676881dca9326238aaa2fa8d04280a568e8/tensorsat/hybrid.py
+New benchmark:
+https://github.com/Stratum-Research-Group/TensorSAT/blob/35249676881dca9326238aaa2fa8d04280a568e8/benchmark_rigorous.py
+Tests:
+https://github.com/Stratum-Research-Group/TensorSAT/blob/35249676881dca9326238aaa2fa8d04280a568e8/test_tensorsat.py
+Other file/line references above refer to the same exact commit, not a moving branch.

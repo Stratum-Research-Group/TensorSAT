@@ -79,7 +79,7 @@ class SingletAttention(nn.Module):
         self.singlet_v = nn.Parameter(torch.randn(num_heads, self.head_dim, num_singlets) * 0.02)
 
     def _project_singlets(self, X: torch.Tensor, basis: torch.Tensor) -> torch.Tensor:
-        if self.use_triton and X.is_cuda and basis.is_cuda:
+        if self.use_triton and X.is_cuda and basis.is_cuda and not (torch.is_grad_enabled() and (X.requires_grad or basis.requires_grad)):
             return triton_singlet_proj(X, basis)
         return torch.einsum('bhnd,hdr->bhnr', X, basis)
 
@@ -109,23 +109,44 @@ class SingletAttention(nn.Module):
             if prev_context is None:
                 prev_context = torch.zeros((B, H, self.num_singlets, d), dtype=Q_s.dtype, device=x.device)
 
-            out_chunk = torch.einsum('bhnr,bhrd->bhnd', Q_s, prev_context)
+            out_global = torch.empty((B, H, N, d), dtype=Q_s.dtype, device=x.device)
             if self.is_causal and N > 1:
-                token_kv_chunk = K_s.unsqueeze(-1) * V.unsqueeze(-2)  # (B, H, N, R, d)
-                causal_intra = torch.cumsum(token_kv_chunk, dim=2)
-                out_intra = torch.einsum('bhnr,bhnrd->bhnd', Q_s, causal_intra)
-                out_chunk = out_chunk + out_intra
+                # Process cached appends in chunks bounded by self.chunk_size
+                chunk = self.chunk_size
+                running_context = prev_context
+                for start in range(0, N, chunk):
+                    end = min(start + chunk, N)
+                    C = end - start
+                    qc = Q_s[:, :, start:end, :]
+                    kc = K_s[:, :, start:end, :]
+                    vc = V[:, :, start:end, :]
+
+                    # 1. Prior context contribution (from previous cache & prior chunks in this append)
+                    out_chunk = torch.einsum('bhcr,bhrd->bhcd', qc, running_context)
+
+                    # 2. Causal intra-chunk contribution
+                    token_kv = kc.unsqueeze(-1) * vc.unsqueeze(-2)  # (B, H, C, R, d)
+                    causal_intra = torch.cumsum(token_kv, dim=2)
+                    out_intra = torch.einsum('bhcr,bhcrd->bhcd', qc, causal_intra)
+                    out_chunk = out_chunk + out_intra
+
+                    # Normalize by causal position square-root in float32 to prevent FP16 overflow
+                    curr_start_pos = start_pos + start
+                    pos_norm = torch.sqrt(
+                        torch.arange(curr_start_pos + 1, curr_start_pos + C + 1, device=x.device, dtype=torch.float32)
+                    ).view(1, 1, C, 1) * math.sqrt(d)
+                    out_global[:, :, start:end, :] = (out_chunk / pos_norm.to(out_chunk.dtype))
+
+                    # Accumulate chunk context into running state
+                    running_context = running_context + torch.einsum('bhcr,bhcd->bhrd', kc, vc)
             elif self.is_causal and N == 1:
                 token_kv = torch.einsum('bhnr,bhnd->bhnrd', K_s, V)
-                out_chunk = out_chunk + torch.einsum('bhnr,bhnrd->bhnd', Q_s, token_kv)
+                out_chunk = torch.einsum('bhnr,bhrd->bhnd', Q_s, prev_context) + torch.einsum('bhnr,bhnrd->bhnd', Q_s, token_kv)
+                pos_norm = math.sqrt(start_pos + 1) * math.sqrt(d)
+                out_global = out_chunk / pos_norm
             else:
                 new_kv = torch.einsum('bhnr,bhnd->bhrd', K_s, V)
                 out_chunk = torch.einsum('bhnr,bhrd->bhnd', Q_s, prev_context + new_kv)
-
-            if self.is_causal:
-                pos_norm = torch.sqrt(torch.arange(start_pos + 1, start_pos + N + 1, device=x.device, dtype=x.dtype)).view(1, 1, N, 1) * math.sqrt(d)
-                out_global = out_chunk / pos_norm
-            else:
                 total_seq_len = start_pos + N
                 out_global = out_chunk / math.sqrt(d * total_seq_len)
 
@@ -161,8 +182,8 @@ class SingletAttention(nn.Module):
                 out_chunk = out_chunk + out_intra
 
                 # Normalize by causal position square-root
-                pos_norm = torch.sqrt(torch.arange(start + 1, end + 1, device=x.device, dtype=x.dtype)).view(1, 1, C, 1) * math.sqrt(d)
-                out_global[:, :, start:end, :] = out_chunk / pos_norm
+                pos_norm = torch.sqrt(torch.arange(start + 1, end + 1, device=x.device, dtype=torch.float32)).view(1, 1, C, 1) * math.sqrt(d)
+                out_global[:, :, start:end, :] = (out_chunk / pos_norm.to(out_chunk.dtype))
 
                 # Update running inter-chunk context
                 running_kv_context = running_kv_context + torch.einsum('bhcr,bhcd->bhrd', k_chunk, v_chunk)

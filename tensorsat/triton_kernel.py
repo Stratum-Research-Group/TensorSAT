@@ -89,6 +89,7 @@ def triton_singlet_proj(Q: torch.Tensor, U: torch.Tensor) -> torch.Tensor:
     H_u, D_u, R = U.shape
     assert H == H_u and D == D_u, f"Head and dim mismatch: Q ({H},{D}) vs U ({H_u},{D_u})"
 
+    # Kernel accumulates in float32 for IEEE precision and stores float32
     out = torch.empty((B, H, N, R), dtype=torch.float32, device=Q.device)
 
     BLOCK_N = 64
@@ -109,4 +110,5 @@ def triton_singlet_proj(Q: torch.Tensor, U: torch.Tensor) -> torch.Tensor:
         BLOCK_D=BLOCK_D,
         BLOCK_R=BLOCK_R,
     )
-    return out
+    # Return in the original input dtype to preserve downstream layer compatibility
+    return out.to(Q.dtype)

@@ -8,20 +8,40 @@ class CNFFormula:
         
     @classmethod
     def from_dimacs(cls, dimacs_str: str) -> "CNFFormula":
-        """Parse DIMACS CNF format string."""
-        clauses = []
+        """
+        Parse DIMACS CNF format string by token streaming.
+        Clauses are strictly delimited by terminal 0 tokens.
+        Empty clauses (a 0 immediately following a 0 or at start) are preserved.
+        """
+        clauses: List[List[int]] = []
         n_vars = 0
-        for line in dimacs_str.strip().splitlines():
+        current_clause: List[int] = []
+
+        # Process token by token across lines
+        for line in dimacs_str.splitlines():
             line = line.strip()
             if not line or line.startswith('c'):
                 continue
             if line.startswith('p cnf'):
                 parts = line.split()
-                n_vars = int(parts[2])
+                if len(parts) >= 3:
+                    n_vars = int(parts[2])
                 continue
-            lits = [int(x) for x in line.split() if int(x) != 0]
-            if lits:
-                clauses.append(lits)
+
+            # Tokenize by whitespace
+            tokens = line.split()
+            for token in tokens:
+                lit = int(token)
+                if lit == 0:
+                    clauses.append(current_clause)
+                    current_clause = []
+                else:
+                    current_clause.append(lit)
+
+        # In case a trailing non-empty clause lacked a terminal 0
+        if current_clause:
+            clauses.append(current_clause)
+
         return cls(n_vars, clauses)
 
     def extract_variable_interaction_graph(self) -> Dict[int, Set[int]]:
@@ -39,15 +59,24 @@ class CNFFormula:
                     adj[v].add(u)
         return adj
 
-    def partition_sparse_and_dense_cliques(self, density_threshold: float = 0.5) -> Tuple[List[Set[int]], List[List[int]]]:
+    def partition_sparse_and_dense_cliques(
+        self, density_threshold: float = 0.5
+    ) -> Tuple[List[Set[int]], List[List[int]], List[List[int]], List[List[int]]]:
         """
         Identifies dense sub-clusters (cliques) for tensor uncrossing,
-        separating them from sparse clauses routed to standard CDCL.
+        and completely partitions the clauses into:
+        1. dense_clusters: variable sets for each identified dense sub-graph.
+        2. sparse_clauses: clauses containing only variables outside dense clusters.
+        3. dense_clauses: clauses whose variables are entirely contained within a dense cluster.
+        4. boundary_clauses: bridge clauses intersecting both dense and sparse variables (or multiple clusters).
+
+        Preserves 100% of clause ownership across partition boundaries:
+        len(sparse_clauses) + len(dense_clauses) + len(boundary_clauses) == len(self.clauses).
         """
         adj = self.extract_variable_interaction_graph()
         dense_clusters: List[Set[int]] = []
         visited = set()
-        
+
         for v in range(1, self.n_vars + 1):
             if v in visited:
                 continue
@@ -67,10 +96,23 @@ class CNFFormula:
                 if density >= density_threshold:
                     dense_clusters.append(cluster)
                     visited.update(cluster)
-                    
-        # Clauses belonging strictly to sparse vs dense
+
         dense_vars = set().union(*dense_clusters) if dense_clusters else set()
-        sparse_clauses = [
-            c for c in self.clauses if not any(abs(l) in dense_vars for l in c)
-        ]
-        return dense_clusters, sparse_clauses
+
+        sparse_clauses: List[List[int]] = []
+        dense_clauses: List[List[int]] = []
+        boundary_clauses: List[List[int]] = []
+
+        for c in self.clauses:
+            clause_vars = {abs(l) for l in c}
+            if not clause_vars.intersection(dense_vars):
+                # Purely outside dense clusters
+                sparse_clauses.append(c)
+            elif any(clause_vars.issubset(cluster) for cluster in dense_clusters):
+                # Purely inside a single dense cluster
+                dense_clauses.append(c)
+            else:
+                # Intersects dense and non-dense or spans multiple clusters
+                boundary_clauses.append(c)
+
+        return dense_clusters, sparse_clauses, dense_clauses, boundary_clauses

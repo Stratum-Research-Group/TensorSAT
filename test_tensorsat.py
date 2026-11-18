@@ -27,15 +27,17 @@ def test_uncrossing_math():
     assert s_factor(0, 1) == 1
     assert s_factor(1, 0) == -1
 
-    for x in [0, 1]:
-        for y in [0, 1]:
-            for u in [0, 1]:
-                for v in [0, 1]:
-                    a0 = eval_slice_A(1, 0, x, y, u, v)
-                    a1 = eval_slice_A(1, 1, x, y, u, v)
-                    target = 1 if (x == v and y == u) else 0
-                    assert a0 + a1 == target
-    print("   ✓ Uncrossing identity mathematically exact across all 1-bit combinations.")
+    # Exhaustively test n_bits = 1, 2, 3 across all (x, y, u, v) index quadruples
+    for n_bits in [1, 2, 3]:
+        dim = 1 << n_bits
+        for x in range(dim):
+            for y in range(dim):
+                for u in range(dim):
+                    for v in range(dim):
+                        total_slice = sum(eval_slice_A(n_bits, i, x, y, u, v) for i in range(n_bits + 1))
+                        target = 1 if (x == v and y == u) else 0
+                        assert total_slice == target, f"Uncrossing failure at n_bits={n_bits}, (x,y,u,v)=({x},{y},{u},{v})"
+    print("   ✓ Uncrossing identity mathematically exact across 4,368 tested index combinations (n_bits 1, 2, 3).")
 
 def test_triton_fused_kernel():
     print("2. Testing Triton fused GPU kernel...")
@@ -126,6 +128,17 @@ def test_numerical_dtype_stability():
         with torch.no_grad():
             out, _ = m(x)
         assert not torch.isnan(out).any() and not torch.isinf(out).any(), f"NaN/Inf detected in {dt}"
+
+    # Verify long-position FP16 stability in attention (Item 4)
+    cache_fp16 = KVCache()
+    cache_fp16.seq_len = 70000
+    cache_fp16.cached_kv_context = torch.full((1, 4, 16, 32), 0.05, device=device, dtype=torch.float16)
+    m_fp16 = SingletAttention(embed_dim=128, num_heads=4, num_singlets=16, use_triton=False).to(device=device, dtype=torch.float16)
+    x_single = torch.randn(1, 1, 128, device=device, dtype=torch.float16)
+    with torch.no_grad():
+        out_long, _ = m_fp16(x_single, kv_cache=cache_fp16, use_cache=True)
+    assert not torch.all(out_long == 0), "FP16 long-position normalization collapsed to zero!"
+    assert not (torch.isnan(out_long).any() or torch.isinf(out_long).any()), "FP16 long-position produced NaN/Inf!"
     print("   ✓ All dtypes (FP32, BF16, FP16) execute cleanly with zero NaNs or Infs.")
 
 def test_ieee_scientific_solvers():
@@ -151,14 +164,27 @@ def test_ieee_scientific_solvers():
     assert diff_c128 < 1e-12, f"Complex128 error too high: {diff_c128}"
     print(f"   ✓ Exact IEEE Complex128 tensor contraction max diff: {diff_c128:.2e}")
 
-    # Grid Poisson Solver (FP64)
-    solver = GridPoissonSolver(grid_size=32, dtype=np.float64)
-    rho = np.random.randn(32, 32).astype(np.float64)
+    # Grid Poisson Solver (FP64) with five-point discrete Laplacian residual test
+    grid_n = 16
+    solver = GridPoissonSolver(grid_size=grid_n, dtype=np.float64)
+    rng = np.random.default_rng(1701)
+    rho = rng.standard_normal((grid_n, grid_n)).astype(np.float64)
     rho = rho - np.mean(rho)
     phi = solver.solve_uncrossed_step(rho)
-    assert phi.shape == (32, 32)
+    assert phi.shape == (grid_n, grid_n)
     assert phi.dtype == np.float64
-    print("   ✓ Grid Poisson Solver (FP64) verified.")
+
+    # Check 5-point discrete Laplacian: (phi[i+1,j] + phi[i-1,j] + phi[i,j+1] + phi[i,j-1] - 4*phi[i,j]) == rho[i,j]
+    laplacian_phi = (
+        np.roll(phi, 1, axis=0)
+        + np.roll(phi, -1, axis=0)
+        + np.roll(phi, 1, axis=1)
+        + np.roll(phi, -1, axis=1)
+        - 4.0 * phi
+    )
+    poisson_residual = np.max(np.abs(laplacian_phi - rho))
+    assert poisson_residual < 1e-12, f"Poisson residual too large: {poisson_residual}"
+    print(f"   ✓ Grid Poisson Solver (FP64) verified with 5-point residual: {poisson_residual:.2e}")
 
 def test_cnf_partitioning():
     print("7. Testing CNF graph extraction and clique partitioning...")
@@ -173,10 +199,39 @@ def test_cnf_partitioning():
     5 -6 0
     """
     cnf = CNFFormula.from_dimacs(dimacs)
-    dense, sparse = cnf.partition_sparse_and_dense_cliques(density_threshold=0.8)
+    dense, sparse, dense_cls, boundary_cls = cnf.partition_sparse_and_dense_cliques(density_threshold=0.8)
     assert len(dense) >= 1
     assert {1, 2, 3, 4} in dense
-    print("   ✓ Dense clique successfully isolated from sparse clauses.")
+    assert len(sparse) + len(dense_cls) + len(boundary_cls) == len(cnf.clauses)
+    assert len(dense_cls) == 4
+    assert len(sparse) == 3
+
+    # Test boundary-preserving clause partitioning on mixed boundary cases
+    dimacs_boundary = """
+    p cnf 5 3
+    1 2 3 4 0
+    4 5 0
+    -5 0
+    """
+    cnf_b = CNFFormula.from_dimacs(dimacs_boundary)
+    dense_b, sparse_b, dense_cls_b, boundary_cls_b = cnf_b.partition_sparse_and_dense_cliques(density_threshold=0.8)
+    assert {1, 2, 3, 4} in dense_b
+    assert [-5] in sparse_b
+    assert [1, 2, 3, 4] in dense_cls_b
+    assert [4, 5] in boundary_cls_b
+    assert len(sparse_b) + len(dense_cls_b) + len(boundary_cls_b) == len(cnf_b.clauses)
+
+    # Test DIMACS token streaming: empty clause, multiline clause, multiple clauses per line
+    dimacs_stream = """
+    c test streaming DIMACS parser
+    p cnf 4 3
+    0
+    1 2
+    3 0 4 -1 0
+    """
+    cnf_s = CNFFormula.from_dimacs(dimacs_stream)
+    assert cnf_s.clauses == [[], [1, 2, 3], [4, -1]]
+    print("   ✓ Dense clique, boundary clause preservation, and token streaming parser verified.")
 
 def test_decay_stabilizer_and_state_norm():
     print("7. Testing DecayStabilizer and StateRMSNorm...")
@@ -193,6 +248,13 @@ def test_decay_stabilizer_and_state_norm():
     new_chunk = torch.randn(B, H, R, d)
     decayed = decay_layer(state, new_chunk, steps=10)
     assert decayed.shape == (B, H, R, d)
+
+    # Verify StateRMSNorm FP16 stability with large values (Item 15)
+    norm_half = StateRMSNorm(rank=R, dim=d).half()
+    state_large_fp16 = torch.full((B, H, R, d), 300.0, dtype=torch.float16)
+    out_half = norm_half(state_large_fp16)
+    assert not torch.all(out_half == 0), "StateRMSNorm FP16 collapsed to zero on large state entries!"
+    assert not (torch.isnan(out_half).any() or torch.isinf(out_half).any()), "StateRMSNorm FP16 produced NaN/Inf!"
     print("   ✓ DecayStabilizer and StateRMSNorm verified.")
 
 

@@ -73,10 +73,11 @@ def run_scaling_benchmark():
         return
 
     hw_name = torch.cuda.get_device_name(0)
-    print("=" * 110)
+    print("=" * 125)
     print(f"BENCHMARK A: HEAD-TO-HEAD SCALING (Standard Softmax vs TensorSAT SingletAttention)")
     print(f"Device: {hw_name} | Batch = 1, Heads = 8, HeadDim = 64, EmbedDim = 512, Dtype = FP32, Causal = True")
-    print("=" * 110)
+    print("Inference Mode: torch.inference_mode() enabled across all runs")
+    print("=" * 125)
 
     embed_dim = 512
     num_heads = 8
@@ -89,49 +90,53 @@ def run_scaling_benchmark():
 
     header = (
         f"{'Context (N)':<12} | "
-        f"{'Std Softmax Latency':<20} | "
-        f"{'SingletAttn Latency':<20} | "
-        f"{'Hybrid Latency':<16} | "
+        f"{'Std Softmax':<18} | "
+        f"{'SingletAttn':<18} | "
+        f"{'Hybrid':<16} | "
         f"{'Speedup':<10} | "
-        f"{'Peak VRAM (MB)':<15}"
+        f"{'SDPA VRAM':<12} | "
+        f"{'Singlet VRAM':<12}"
     )
     print(header)
-    print("-" * 110)
+    print("-" * 125)
 
-    for N in seq_lengths:
-        torch.cuda.empty_cache()
-        gc.collect()
-
-        x = torch.randn(1, N, embed_dim, device=device)
-
-        # 1. Measure Standard Softmax
-        sdpa_oom = False
-        sdpa_latency = float('nan')
-        try:
-            torch.cuda.reset_peak_memory_stats()
-            sdpa_latency = measure_cuda_latency(lambda: sdpa_layer(x), warmup=2, iters=5)
-            sdpa_vram = torch.cuda.max_memory_allocated() / (1024 * 1024)
-        except torch.cuda.OutOfMemoryError:
-            sdpa_oom = True
+    with torch.inference_mode():
+        for N in seq_lengths:
             torch.cuda.empty_cache()
+            gc.collect()
 
-        # 2. Measure TensorSAT SingletAttention
-        torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
-        singlet_latency = measure_cuda_latency(lambda: singlet_layer(x), warmup=2, iters=5)
-        singlet_vram = torch.cuda.max_memory_allocated() / (1024 * 1024)
+            x = torch.randn(1, N, embed_dim, device=device)
 
-        # 3. Measure HybridSingletAttention
-        torch.cuda.empty_cache()
-        hybrid_latency = measure_cuda_latency(lambda: hybrid_layer(x), warmup=2, iters=5)
+            # 1. Measure Standard Softmax
+            sdpa_oom = False
+            sdpa_latency = float('nan')
+            sdpa_vram = float('nan')
+            try:
+                torch.cuda.reset_peak_memory_stats()
+                sdpa_latency = measure_cuda_latency(lambda: sdpa_layer(x), warmup=2, iters=5)
+                sdpa_vram = torch.cuda.max_memory_allocated() / (1024 * 1024)
+            except torch.cuda.OutOfMemoryError:
+                sdpa_oom = True
+                torch.cuda.empty_cache()
 
-        speedup_str = f"{sdpa_latency / singlet_latency:>6.2f}x" if not sdpa_oom else "Inf (OOM)"
-        sdpa_str = f"{sdpa_latency:>8.2f} ms" if not sdpa_oom else "CUDA OOM"
-        singlet_str = f"{singlet_latency:>8.2f} ms"
-        hybrid_str = f"{hybrid_latency:>8.2f} ms"
-        vram_str = f"{singlet_vram:>8.1f} MB"
+            # 2. Measure TensorSAT SingletAttention
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats()
+            singlet_latency = measure_cuda_latency(lambda: singlet_layer(x), warmup=2, iters=5)
+            singlet_vram = torch.cuda.max_memory_allocated() / (1024 * 1024)
 
-        print(f"{N:<12} | {sdpa_str:<20} | {singlet_str:<20} | {hybrid_str:<16} | {speedup_str:<10} | {vram_str:<15}")
+            # 3. Measure HybridSingletAttention
+            torch.cuda.empty_cache()
+            hybrid_latency = measure_cuda_latency(lambda: hybrid_layer(x), warmup=2, iters=5)
+
+            speedup_str = f"{sdpa_latency / singlet_latency:>6.2f}x" if not sdpa_oom else "N/A (SDPA OOM)"
+            sdpa_str = f"{sdpa_latency:>8.2f} ms" if not sdpa_oom else "CUDA OOM"
+            singlet_str = f"{singlet_latency:>8.2f} ms"
+            hybrid_str = f"{hybrid_latency:>8.2f} ms"
+            sdpa_vram_str = f"{sdpa_vram:>7.1f} MB" if not sdpa_oom else "OOM"
+            singlet_vram_str = f"{singlet_vram:>7.1f} MB"
+
+            print(f"{N:<12} | {sdpa_str:<18} | {singlet_str:<18} | {hybrid_str:<16} | {speedup_str:<10} | {sdpa_vram_str:<12} | {singlet_vram_str:<12}")
 
 
 def run_autoregressive_benchmark():

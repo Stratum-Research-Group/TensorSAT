@@ -33,8 +33,10 @@ class StateRMSNorm(nn.Module):
         state: shape (B, H, R, d)
         returns normalized state of same shape
         """
-        variance = torch.mean(state**2, dim=(-2, -1), keepdim=True)
-        normed = state * torch.rsqrt(variance + self.eps)
+        # Compute variance in FP32 to prevent mantissa overflow in FP16 / BF16
+        state_fp32 = state.float()
+        variance = torch.mean(state_fp32**2, dim=(-2, -1), keepdim=True)
+        normed = (state_fp32 * torch.rsqrt(variance + self.eps)).to(state.dtype)
         return normed * self.scale
 
 
