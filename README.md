@@ -55,15 +55,15 @@ All benchmarks below were executed on bare metal using the compiled **Triton 3.9
 
 | Context Length ($N$ Tokens) | Standard Softmax Attention (SDPA / Flash) | TensorSAT SingletAttention (Triton JIT) | Singlet Peak VRAM | Speedup / Scaling Behavior |
 | :--- | :--- | :--- | :--- | :--- |
-| **1,024 tokens** | **0.50 ms** | 0.57 ms | 90.4 MB | 0.88x (Std Softmax faster on tiny context) |
-| **2,048 tokens** | 1.26 ms | **1.17 ms** | 101.4 MB | **1.08x faster** (Crossover zone) |
-| **4,096 tokens** | 3.70 ms | **2.35 ms** | 123.4 MB | **1.57x faster** |
-| **8,192 tokens** | 12.32 ms | **4.84 ms** | 167.4 MB | **2.54x faster** |
-| **16,384 tokens** | 44.52 ms | **9.73 ms** | 287.2 MB | **4.58x faster** |
-| **32,768 tokens** | 171.00 ms | **19.59 ms** | 527.2 MB | **8.73x faster** |
-| **65,536 tokens** | 667.02 ms | **39.57 ms** | 1,007.2 MB | **16.86x faster** |
-| **100,000 tokens** *(proj.)* | ~1,500 ms (1.50 s) | **~60 ms** (0.06 s) | ~1.7 GB (streamed) | **~25x faster** |
-| **131,072 tokens** *(proj.)* | ~2,560 ms (2.56 s) | **~78 ms** (0.08 s) | ~2.0 GB (streamed) | **~33x faster** |
+| **1,024 tokens** | **0.45 ms** | 0.70 ms | 90.4 MB | 0.65x (Std Softmax faster on tiny context) |
+| **2,048 tokens** | **1.25 ms** | 1.34 ms | 101.4 MB | 0.93x (Crossover zone) |
+| **4,096 tokens** | 3.70 ms | **2.57 ms** | 123.4 MB | **1.44x faster** |
+| **8,192 tokens** | 12.43 ms | **4.98 ms** | 167.4 MB | **2.50x faster** |
+| **16,384 tokens** | 44.81 ms | **9.85 ms** | 287.2 MB | **4.55x faster** |
+| **32,768 tokens** | 171.74 ms | **19.57 ms** | 527.2 MB | **8.77x faster** |
+| **65,536 tokens** | 685.24 ms | **38.92 ms** | 1,007.2 MB | **17.61x faster** |
+| **100,000 tokens** *(proj.)* | ~1,500 ms (1.50 s) | **~59 ms** (0.06 s) | ~1.7 GB (streamed) | **~25x faster** |
+| **131,072 tokens** *(proj.)* | ~2,560 ms (2.56 s) | **~77 ms** (0.08 s) | ~2.0 GB (streamed) | **~33x faster** |
 | **1,000,000 tokens** *(proj.)* | OOM (>20 s proj.) | **~860 ms** (0.86 s) | ~6.1 GB ($Q,K,V$ alloc) | **>25x faster (linear $\mathcal{O}(N)$)** |
 
 ---
