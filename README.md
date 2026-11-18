@@ -131,9 +131,6 @@ eth/TensorSAT/
 │   ├── tensorsat_logo.png            # Official brand banner (1376x768)
 │   ├── tensorsat_logo.jpg            # High-res JPEG
 │   ├── tensorsat_logo.svg            # Scalable vector graphic
-│   ├── tensorsat_rust_logo.png       # Official Rust Edition brand banner
-│   ├── tensorsat_rust_logo.jpg       # High-res Rust Edition JPEG
-│   └── tensorsat_rust_logo.svg       # Rust Edition vector graphic
 │
 ├── tensorsat/                        # Core Python engine
 │   ├── __init__.py                   # Package exports (v0.2.0)
