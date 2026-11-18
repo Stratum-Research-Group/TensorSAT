@@ -1,0 +1,181 @@
+digraph TensorSAT_Pipeline {
+    graph [
+        rankdir="LR",
+        nodesep=0.4,
+        ranksep=0.6,
+        bgcolor="#0b0f19",
+        fontname="Helvetica,Arial,sans-serif",
+        fontsize=13,
+        fontcolor="#f8fafc",
+        pad="0.5",
+        compound=true
+    ];
+    node [
+        fontname="Helvetica,Arial,sans-serif",
+        fontsize=10,
+        fontcolor="#ffffff",
+        style="filled,rounded",
+        shape="box",
+        penwidth=1.5
+    ];
+    edge [
+        fontname="Helvetica,Arial,sans-serif",
+        fontsize=9,
+        fontcolor="#94a3b8",
+        color="#38bdf8",
+        arrowsize=0.8,
+        penwidth=1.6
+    ];
+
+    labelloc="t";
+    label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="0"><TR><TD><FONT POINT-SIZE="18" COLOR="#38bdf8"><B>TensorSAT SingletAttention Forward &amp; Autoregressive Pipeline</B></FONT></TD></TR><TR><TD><FONT POINT-SIZE="11" COLOR="#94a3b8">Detailed Token Processing, Triton JIT Projection &amp; O(1) Recurrent KV-Cache Flow</FONT></TD></TR></TABLE>>;
+
+    // Step 1: Input Projections
+    subgraph cluster_p1 {
+        label="Phase 1: Input Projection";
+        color="#3b82f6";
+        fontcolor="#60a5fa";
+        style="dashed,rounded";
+        bgcolor="#111827";
+
+        token_in [
+            label=<<TABLE BORDER="0" CELLBORDER="0" CELLPADDING="3">
+                <TR><TD><FONT COLOR="#93c5fd"><B>Input Tokens / Hidden State</B></FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#cbd5e1">X ∈ ℝ^[B × N × D]</FONT></TD></TR>
+            </TABLE>>,
+            fillcolor="#1e3a8a",
+            color="#3b82f6"
+        ];
+
+        qkv_linear [
+            label=<<TABLE BORDER="0" CELLBORDER="0" CELLPADDING="3">
+                <TR><TD><FONT COLOR="#67e8f9"><B>Linear Projections (W_q, W_k, W_v)</B></FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#cbd5e1">Q, K, V ∈ ℝ^[B × H × N × d]</FONT></TD></TR>
+            </TABLE>>,
+            fillcolor="#0e7490",
+            color="#06b6d4"
+        ];
+
+        token_in -> qkv_linear [label="Feedforward"];
+    }
+
+    // Step 2: Singlet Basis Projection
+    subgraph cluster_p2 {
+        label="Phase 2: Discrete Singlet Projection";
+        color="#06b6d4";
+        fontcolor="#22d3ee";
+        style="dashed,rounded";
+        bgcolor="#111827";
+
+        singlet_basis [
+            label=<<TABLE BORDER="0" CELLBORDER="0" CELLPADDING="3">
+                <TR><TD><FONT COLOR="#a5f3fc"><B>Singlet Basis Cache</B></FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#cbd5e1">U_basis ∈ ℝ^[rank × d]</FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#94a3b8">Derived from s_factor {-1,0,1}</FONT></TD></TR>
+            </TABLE>>,
+            fillcolor="#155e75",
+            color="#0891b2"
+        ];
+
+        triton_fused [
+            label=<<TABLE BORDER="0" CELLBORDER="0" CELLPADDING="3">
+                <TR><TD><FONT COLOR="#fef08a"><B>Triton 3.x Fused Projection</B></FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#cbd5e1">fused_singlet_proj_kernel</FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#94a3b8">Tiled GEMM: Q_singlet = Q · U_basisᵀ</FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#94a3b8">K_singlet = K · U_basisᵀ</FONT></TD></TR>
+            </TABLE>>,
+            fillcolor="#713f12",
+            color="#f59e0b"
+        ];
+
+        singlet_basis -> triton_fused [label="Basis Load"];
+        qkv_linear -> triton_fused [label="Q, K streams"];
+    }
+
+    // Step 3: Prefix Scan & State Accumulation
+    subgraph cluster_p3 {
+        label="Phase 3: Linear-Time Prefix Accumulation (O(N))";
+        color="#10b981";
+        fontcolor="#34d399";
+        style="dashed,rounded";
+        bgcolor="#111827";
+
+        outer_product [
+            label=<<TABLE BORDER="0" CELLBORDER="0" CELLPADDING="3">
+                <TR><TD><FONT COLOR="#6ee7b7"><B>Rank-1 Outer Product</B></FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#cbd5e1">ΔS_t = K_singlet[t]ᵀ ⊗ V[t]</FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#94a3b8">Shape: [B, H, rank, d]</FONT></TD></TR>
+            </TABLE>>,
+            fillcolor="#064e3b",
+            color="#10b981"
+        ];
+
+        decay_unit [
+            label=<<TABLE BORDER="0" CELLBORDER="0" CELLPADDING="3">
+                <TR><TD><FONT COLOR="#fed7aa"><B>Decay Stabilizer</B></FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#cbd5e1">γ_h ∈ (0, 1)</FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#94a3b8">S_t = γ · S_(t-1) + ΔS_t</FONT></TD></TR>
+            </TABLE>>,
+            fillcolor="#7c2d12",
+            color="#ea580c"
+        ];
+
+        rms_norm [
+            label=<<TABLE BORDER="0" CELLBORDER="0" CELLPADDING="3">
+                <TR><TD><FONT COLOR="#fef3c7"><B>StateRMSNorm</B></FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#cbd5e1">Bounded State Dynamics</FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#94a3b8">Prevents Drift across 1M+ tokens</FONT></TD></TR>
+            </TABLE>>,
+            fillcolor="#78350f",
+            color="#d97706"
+        ];
+
+        triton_fused -> outer_product [label="K_singlet"];
+        qkv_linear -> outer_product [label="V tensor", color="#a855f7"];
+        outer_product -> decay_unit [label="Update step"];
+        decay_unit -> rms_norm [label="Stabilized State S_t"];
+    }
+
+    // Step 4: Contraction & Output
+    subgraph cluster_p4 {
+        label="Phase 4: Output Contraction & Cache";
+        color="#ec4899";
+        fontcolor="#f472b6";
+        style="dashed,rounded";
+        bgcolor="#111827";
+
+        contract_out [
+            label=<<TABLE BORDER="0" CELLBORDER="0" CELLPADDING="3">
+                <TR><TD><FONT COLOR="#fbcfe8"><B>Output Contraction</B></FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#cbd5e1">Y_t = Q_singlet[t] · S_t</FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#94a3b8">Shape: [B, H, N, d]</FONT></TD></TR>
+            </TABLE>>,
+            fillcolor="#831843",
+            color="#db2777"
+        ];
+
+        out_proj [
+            label=<<TABLE BORDER="0" CELLBORDER="0" CELLPADDING="3">
+                <TR><TD><FONT COLOR="#f472b6"><B>Out Linear Projection (W_out)</B></FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#cbd5e1">Y ∈ ℝ^[B × N × D]</FONT></TD></TR>
+            </TABLE>>,
+            fillcolor="#9d174d",
+            color="#f43f5e"
+        ];
+
+        kv_state [
+            label=<<TABLE BORDER="0" CELLBORDER="0" CELLPADDING="3">
+                <TR><TD><FONT COLOR="#67e8f9"><B>Recurrent KV Cache</B></FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#cbd5e1">Saved State S_t (O(1) memory)</FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#a7f3d0">32 KiB Macro State</FONT></TD></TR>
+            </TABLE>>,
+            fillcolor="#164e63",
+            color="#06b6d4"
+        ];
+
+        triton_fused -> contract_out [label="Q_singlet", color="#f59e0b"];
+        rms_norm -> contract_out [label="Accumulated State S_t"];
+        rms_norm -> kv_state [label="Cache store"];
+        contract_out -> out_proj [label="Multihead Concatenation"];
+    }
+}

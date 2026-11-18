@@ -1,0 +1,248 @@
+digraph TensorSAT_Architecture {
+    // General Graph Styling
+    graph [
+        rankdir="TB",
+        nodesep=0.5,
+        ranksep=0.7,
+        bgcolor="#0f172a",
+        fontname="Helvetica,Arial,sans-serif",
+        fontsize=14,
+        fontcolor="#f8fafc",
+        pad="0.5",
+        compound=true
+    ];
+    node [
+        fontname="Helvetica,Arial,sans-serif",
+        fontsize=11,
+        fontcolor="#ffffff",
+        style="filled,rounded",
+        shape="box",
+        penwidth=1.5
+    ];
+    edge [
+        fontname="Helvetica,Arial,sans-serif",
+        fontsize=9,
+        fontcolor="#94a3b8",
+        color="#38bdf8",
+        arrowsize=0.8,
+        penwidth=1.8
+    ];
+
+    // Title
+    labelloc="t";
+    label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="0"><TR><TD><FONT POINT-SIZE="20" COLOR="#38bdf8"><B>TensorSAT System Architecture &amp; Execution Pipeline</B></FONT></TD></TR><TR><TD><FONT POINT-SIZE="12" COLOR="#94a3b8">Planar Grid Tensor Contraction via Discrete Singlet Uncrossing &amp; Linear-Time Attention</FONT></TD></TR></TABLE>>;
+
+    // Subgraph 1: Mathematical Core
+    subgraph cluster_math {
+        label="1. Mathematical Foundation (Singlet-Swap Decomposition)";
+        color="#3b82f6";
+        fontcolor="#60a5fa";
+        style="dashed,rounded";
+        bgcolor="#1e293b";
+
+        identity [
+            label=<<TABLE BORDER="0" CELLBORDER="0" CELLPADDING="4">
+                <TR><TD><FONT COLOR="#93c5fd"><B>Singlet Uncrossing Identity</B></FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#e2e8f0">SWAP = I - 2 · |Ψ⁻⟩⟨Ψ⁻|</FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#94a3b8">X₁(x,y,u,v) = I₁(x,y,u,v) - s(x,y)·s(u,v)</FONT></TD></TR>
+            </TABLE>>,
+            fillcolor="#1e3a8a",
+            color="#3b82f6"
+        ];
+
+        uncrossing_engine [
+            label=<<TABLE BORDER="0" CELLBORDER="0" CELLPADDING="4">
+                <TR><TD><FONT COLOR="#67e8f9"><B>Uncrossing Engine</B></FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#cbd5e1">tensorsat.uncrossing</FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#94a3b8">s_factor(p, q) ∈ {-1, 0, 1}</FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#94a3b8">eval_slice_A(λ, i, x, y, u, v)</FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#34d399">Lossless: Zero IEEE 754 Drift</FONT></TD></TR>
+            </TABLE>>,
+            fillcolor="#0e7490",
+            color="#06b6d4"
+        ];
+
+        identity -> uncrossing_engine [label="Basis Generation"];
+    }
+
+    // Subgraph 2: Ingestion & Frontends
+    subgraph cluster_frontend {
+        label="2. Ingestion & Dual Pipeline Frontends";
+        color="#8b5cf6";
+        fontcolor="#c084fc";
+        style="dashed,rounded";
+        bgcolor="#1e293b";
+
+        input_cnf [
+            label=<<TABLE BORDER="0" CELLBORDER="0" CELLPADDING="4">
+                <TR><TD><FONT COLOR="#f472b6"><B>CNF / SAT Instance</B></FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#cbd5e1">DIMACS / 3-SAT Formula</FONT></TD></TR>
+            </TABLE>>,
+            fillcolor="#4c1d95",
+            color="#a855f7"
+        ];
+
+        cnf_parser [
+            label=<<TABLE BORDER="0" CELLBORDER="0" CELLPADDING="4">
+                <TR><TD><FONT COLOR="#d8b4fe"><B>CNF Preprocessor</B></FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#cbd5e1">tensorsat.cnf_preprocessor</FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#94a3b8">• Variable Interaction Graph</FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#94a3b8">• Sparse / Dense Clique Split</FONT></TD></TR>
+            </TABLE>>,
+            fillcolor="#581c87",
+            color="#c084fc"
+        ];
+
+        input_seq [
+            label=<<TABLE BORDER="0" CELLBORDER="0" CELLPADDING="4">
+                <TR><TD><FONT COLOR="#38bdf8"><B>Sequence Tokens (LLM)</B></FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#cbd5e1">Batch, Length (N), Dim (D)</FONT></TD></TR>
+            </TABLE>>,
+            fillcolor="#0369a1",
+            color="#0284c7"
+        ];
+
+        input_cnf -> cnf_parser [label="DIMACS parsing"];
+    }
+
+    // Subgraph 3: Acceleration Core & Execution Engines
+    subgraph cluster_engines {
+        label="3. Core Execution Engines & Neural Hardware Acceleration";
+        color="#10b981";
+        fontcolor="#34d399";
+        style="dashed,rounded";
+        bgcolor="#1e293b";
+
+        singlet_attn [
+            label=<<TABLE BORDER="0" CELLBORDER="0" CELLPADDING="4">
+                <TR><TD><FONT COLOR="#6ee7b7"><B>SingletAttention Engine</B></FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#cbd5e1">tensorsat.attention (O(N) Complexity)</FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#94a3b8">• Project Q, K via Singlet Basis</FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#94a3b8">• Causal Prefix Accumulator: S_t = S_(t-1) + K_tᵀ V_t</FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#a7f3d0">32 KiB Macro State vs 950 GB Softmax</FONT></TD></TR>
+            </TABLE>>,
+            fillcolor="#064e3b",
+            color="#10b981"
+        ];
+
+        triton_jit [
+            label=<<TABLE BORDER="0" CELLBORDER="0" CELLPADDING="4">
+                <TR><TD><FONT COLOR="#fef08a"><B>Triton 3.x GPU Kernel</B></FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#cbd5e1">tensorsat.triton_kernel</FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#94a3b8">• fused_singlet_proj_kernel</FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#94a3b8">• Block Tile [BLOCK_M, BLOCK_K]</FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#fbbf24">17.6x Speedup @ 65k Context</FONT></TD></TR>
+            </TABLE>>,
+            fillcolor="#713f12",
+            color="#f59e0b"
+        ];
+
+        kv_cache [
+            label=<<TABLE BORDER="0" CELLBORDER="0" CELLPADDING="4">
+                <TR><TD><FONT COLOR="#67e8f9"><B>Recurrent KV Cache</B></FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#cbd5e1">tensorsat.attention.KVCache</FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#94a3b8">• O(1) Token Generation Time</FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#94a3b8">• 4,400+ tokens/s throughput</FONT></TD></TR>
+            </TABLE>>,
+            fillcolor="#164e63",
+            color="#06b6d4"
+        ];
+
+        stabilizers [
+            label=<<TABLE BORDER="0" CELLBORDER="0" CELLPADDING="4">
+                <TR><TD><FONT COLOR="#fdba74"><B>Numerical Stabilizers</B></FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#cbd5e1">tensorsat.stabilizer</FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#94a3b8">• StateRMSNorm (scale bounds)</FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#94a3b8">• DecayStabilizer (retention decay)</FONT></TD></TR>
+            </TABLE>>,
+            fillcolor="#7c2d12",
+            color="#f97316"
+        ];
+
+        hybrid_attn [
+            label=<<TABLE BORDER="0" CELLBORDER="0" CELLPADDING="4">
+                <TR><TD><FONT COLOR="#f43f5e"><B>Hybrid Architecture</B></FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#cbd5e1">tensorsat.hybrid</FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#94a3b8">• Local Window Softmax Attention</FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#94a3b8">• Global Singlet Long-Context Path</FONT></TD></TR>
+            </TABLE>>,
+            fillcolor="#881337",
+            color="#f43f5e"
+        ];
+
+        scientific_engine [
+            label=<<TABLE BORDER="0" CELLBORDER="0" CELLPADDING="4">
+                <TR><TD><FONT COLOR="#e2e8f0"><B>Scientific IEEE Contractor</B></FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#cbd5e1">tensorsat.scientific</FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#94a3b8">• FP64 &amp; Complex128 Exact Tensor Math</FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#94a3b8">• Grid Poisson Solver (Uncrossed Steps)</FONT></TD></TR>
+            </TABLE>>,
+            fillcolor="#334155",
+            color="#64748b"
+        ];
+
+        singlet_attn -> triton_jit [label="JIT fused acceleration"];
+        singlet_attn -> kv_cache [label="Streaming Autoregressive state"];
+        singlet_attn -> stabilizers [label="State stabilization"];
+        singlet_attn -> hybrid_attn [label="Global context router"];
+    }
+
+    // Subgraph 4: Downstream Outputs & Integration
+    subgraph cluster_outputs {
+        label="4. Applications, Outputs & Adapter Integration";
+        color="#ec4899";
+        fontcolor="#f472b6";
+        style="dashed,rounded";
+        bgcolor="#1e293b";
+
+        adapter [
+            label=<<TABLE BORDER="0" CELLBORDER="0" CELLPADDING="4">
+                <TR><TD><FONT COLOR="#f9a8d4"><B>Softmax-to-Singlet Adapter</B></FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#cbd5e1">tensorsat.adapter</FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#94a3b8">• Zero-shot / Distillation Alignment</FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#94a3b8">• Drop-in Pretrained LLM Migration</FONT></TD></TR>
+            </TABLE>>,
+            fillcolor="#831843",
+            color="#ec4899"
+        ];
+
+        output_llm [
+            label=<<TABLE BORDER="0" CELLBORDER="0" CELLPADDING="4">
+                <TR><TD><FONT COLOR="#38bdf8"><B>1M+ Token Linear LLM Inference</B></FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#a7f3d0">Linear Compute O(N) | Low Memory Footprint</FONT></TD></TR>
+            </TABLE>>,
+            fillcolor="#0369a1",
+            color="#38bdf8"
+        ];
+
+        output_sat [
+            label=<<TABLE BORDER="0" CELLBORDER="0" CELLPADDING="4">
+                <TR><TD><FONT COLOR="#fcd34d"><B>Exact Model Counting (#SAT)</B></FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#cbd5e1">Planarized Uncrossing Elimination</FONT></TD></TR>
+            </TABLE>>,
+            fillcolor="#78350f",
+            color="#eab308"
+        ];
+
+        output_hpc [
+            label=<<TABLE BORDER="0" CELLBORDER="0" CELLPADDING="4">
+                <TR><TD><FONT COLOR="#93c5fd"><B>HPC / Scientific Simulation</B></FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="9" COLOR="#cbd5e1">PDE Grids, Quantum &amp; Lattice QCD Math</FONT></TD></TR>
+            </TABLE>>,
+            fillcolor="#1e3a8a",
+            color="#3b82f6"
+        ];
+
+        adapter -> output_llm;
+        hybrid_attn -> output_llm;
+        scientific_engine -> output_hpc;
+    }
+
+    // Inter-cluster connections
+    uncrossing_engine -> singlet_attn [label="Basis projections (U_basis)", color="#06b6d4"];
+    uncrossing_engine -> scientific_engine [label="Exact slice tensors", color="#64748b"];
+    cnf_parser -> scientific_engine [label="Contraction graphs", color="#a855f7"];
+    cnf_parser -> output_sat [label="Partitioned formula", color="#eab308"];
+    input_seq -> singlet_attn [label="Q, K, V Embeddings", color="#38bdf8"];
+    input_seq -> adapter [label="Pretrained transformer heads", color="#ec4899"];
+}
