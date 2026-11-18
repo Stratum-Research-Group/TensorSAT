@@ -57,6 +57,9 @@ class HybridSingletAttention(nn.Module):
         self.chunk_size = chunk_size
 
         assert embed_dim % num_heads == 0, "embed_dim must be divisible by num_heads"
+        assert chunk_size > 0, "chunk_size must be positive"
+        assert window_size > 0, "window_size must be positive"
+        assert 0.0 < base_decay < 1.0, "base_decay must be in (0, 1)"
         if not is_causal:
             raise NotImplementedError(
                 "Non-causal bidirectional mode is not currently supported in HybridSingletAttention. "
@@ -183,9 +186,9 @@ class HybridSingletAttention(nn.Module):
             out_intra = torch.einsum("bhcr,bhcrd->bhcd", qc, causal_intra)
             out_chunk = out_chunk + out_intra
 
-            # Use float32 for positions and normalization to avoid FP16 overflow at long sequence lengths
+            # Use float32 for positions and normalization to avoid FP16 denominator overflow at long sequence lengths
             pos_norm = torch.sqrt(torch.arange(start + 1, end + 1, device=x.device, dtype=torch.float32)).view(1, 1, C, 1) * math.sqrt(d)
-            out_global[:, :, start:end, :] = (out_chunk / pos_norm.to(out_chunk.dtype))
+            out_global[:, :, start:end, :] = (out_chunk.float() / pos_norm).to(out_chunk.dtype)
 
             # Update running state with decay stabilizer
             new_chunk_kv = torch.einsum("bhcr,bhcd->bhrd", kc, vc)

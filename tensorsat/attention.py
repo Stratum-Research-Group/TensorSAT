@@ -69,6 +69,8 @@ class SingletAttention(nn.Module):
         self.chunk_size = chunk_size
 
         assert embed_dim % num_heads == 0, "embed_dim must be divisible by num_heads"
+        assert chunk_size > 0, "chunk_size must be positive"
+        assert num_singlets > 0, "num_singlets must be positive"
 
         self.q_proj = nn.Linear(embed_dim, embed_dim)
         self.k_proj = nn.Linear(embed_dim, embed_dim)
@@ -103,7 +105,9 @@ class SingletAttention(nn.Module):
         K_s = self._project_singlets(K, self.singlet_v)  # (B, H, N, R)
 
         # Autoregressive Generation with KV Cache
-        if use_cache and kv_cache is not None:
+        if use_cache:
+            if kv_cache is None:
+                kv_cache = KVCache()
             start_pos = kv_cache.seq_len
             prev_context = kv_cache.cached_kv_context
             if prev_context is None:
@@ -130,12 +134,12 @@ class SingletAttention(nn.Module):
                     out_intra = torch.einsum('bhcr,bhcrd->bhcd', qc, causal_intra)
                     out_chunk = out_chunk + out_intra
 
-                    # Normalize by causal position square-root in float32 to prevent FP16 overflow
+                    # Normalize by causal position square-root in float32 to prevent FP16 denominator overflow
                     curr_start_pos = start_pos + start
                     pos_norm = torch.sqrt(
                         torch.arange(curr_start_pos + 1, curr_start_pos + C + 1, device=x.device, dtype=torch.float32)
                     ).view(1, 1, C, 1) * math.sqrt(d)
-                    out_global[:, :, start:end, :] = (out_chunk / pos_norm.to(out_chunk.dtype))
+                    out_global[:, :, start:end, :] = (out_chunk.float() / pos_norm).to(out_chunk.dtype)
 
                     # Accumulate chunk context into running state
                     running_context = running_context + torch.einsum('bhcr,bhcd->bhrd', kc, vc)
@@ -143,12 +147,13 @@ class SingletAttention(nn.Module):
                 token_kv = torch.einsum('bhnr,bhnd->bhnrd', K_s, V)
                 out_chunk = torch.einsum('bhnr,bhrd->bhnd', Q_s, prev_context) + torch.einsum('bhnr,bhnrd->bhnd', Q_s, token_kv)
                 pos_norm = math.sqrt(start_pos + 1) * math.sqrt(d)
-                out_global = out_chunk / pos_norm
+                out_global = (out_chunk.float() / pos_norm).to(out_chunk.dtype)
             else:
                 new_kv = torch.einsum('bhnr,bhnd->bhrd', K_s, V)
                 out_chunk = torch.einsum('bhnr,bhrd->bhnd', Q_s, prev_context + new_kv)
                 total_seq_len = start_pos + N
-                out_global = out_chunk / math.sqrt(d * total_seq_len)
+                pos_norm = math.sqrt(d * total_seq_len)
+                out_global = (out_chunk.float() / pos_norm).to(out_chunk.dtype)
 
             chunk_kv_context = torch.einsum('bhnr,bhnd->bhrd', K_s, V)
             kv_cache.update(K, V, chunk_kv_context)
@@ -181,9 +186,9 @@ class SingletAttention(nn.Module):
 
                 out_chunk = out_chunk + out_intra
 
-                # Normalize by causal position square-root
+                # Normalize by causal position square-root in float32
                 pos_norm = torch.sqrt(torch.arange(start + 1, end + 1, device=x.device, dtype=torch.float32)).view(1, 1, C, 1) * math.sqrt(d)
-                out_global[:, :, start:end, :] = (out_chunk / pos_norm.to(out_chunk.dtype))
+                out_global[:, :, start:end, :] = (out_chunk.float() / pos_norm).to(out_chunk.dtype)
 
                 # Update running inter-chunk context
                 running_kv_context = running_kv_context + torch.einsum('bhcr,bhcd->bhrd', k_chunk, v_chunk)

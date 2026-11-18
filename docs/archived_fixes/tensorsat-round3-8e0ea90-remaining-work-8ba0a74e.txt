@@ -1,0 +1,418 @@
+TENSORSAT - ROUND 3 FIX VERIFICATION AND REMAINING WORK
+Reviewed 2026-11-18. Read-only review; no repository fixes applied.
+Repository: https://github.com/Stratum-Research-Group/TensorSAT
+Previous review: 35249676881dca9326238aaa2fa8d04280a568e8
+Reviewed HEAD: 8e0ea90a2ebc49c42316c0023fba5be3b2d4113d
+Commit: https://github.com/Stratum-Research-Group/TensorSAT/commit/8e0ea90a2ebc49c42316c0023fba5be3b2d4113d
+All file/line references below refer to this exact HEAD.
+
+VERDICT
+This is a real improvement, not just documentation edits. The cached-append
+workspace fix works on CPU; causality and partition agreement are preserved.
+Unsupported hybrid cache and bidirectional modes now reject requests clearly.
+DIMACS clause streaming and clause preservation are repaired for the tested valid
+inputs. The old FP16 state=300 normalization failure is fixed. Production algebra
+and Poisson residual tests have been strengthened, and CPU wheel installation works.
+
+Not a clean production sweep yet. Hybrid outputs still change with chunk_size;
+low-precision state arithmetic still has reproduced failures; normalization still
+fails at a larger synthetic position despite fixing the old 70,000-position case; malformed DIMACS remains
+unchecked. GPU correctness, autocast, and end-to-end model quality remain open.
+Benchmark methodology is better, but the tables still lack reproducible raw logs
+and the remaining projection/quality claims exceed what the code demonstrates.
+
+SCOPE AND SAFE TEST RECORD
+- Inventoried 24 tracked files. Read all 15 Python files: 10 package modules,
+  four benchmark scripts, and the test file. Reviewed README, package metadata,
+  lockfile project consistency, and both review records as historical context.
+  No visual assessment of unchanged logos and no transitive dependency audit.
+- Independent environment: Python 3.10.12, torch 2.14.1+cpu, numpy 2.2.6,
+  pytest 9.2.0. No Triton installed; CUDA unavailable. This is not a test of
+  the author's GPU or of every dependency version/platform in uv.lock.
+- pytest: 10 passed. One is the GPU test's early return, NOT an executed GPU test
+  or a real pytest skip. Repeated CPU suite runs pass.
+- The suite now exhaustively calls production eval_slice_A at n_bits 1,2,3:
+  16+256+4096 = 4,368 index quadruples, all passing.
+- benchmark_contraction.py now imports the production evaluator. Executed
+  n_bits 1,2,3: direct and decomposed integer totals agree at 40,77,70.
+  This validates those examples, not a general contraction speedup.
+- Seed 1701; SingletAttention B=2,N=37,D=64,H=4,R=5,chunk_size=7:
+  cached partitions [1]*37, [4]*9+[1], [13,5,19], and [37] agree with
+  prefill within 7.45e-9. Cache length ends at 37, summary shape (2,4,5,16).
+- With an 11-token prefix and a 13-token append, perturbing the last append
+  token by +100 changes earlier outputs by exactly zero in the tested case.
+- Instrumented cumsum inputs during a 37-token cached append: five tensors of
+  shape (2,4,7,5,16), then one (2,4,2,5,16). The rank-state prefix workspace
+  is chunk-bounded. This is shape instrumentation, NOT measured peak memory.
+  Q/K/V, features and outputs still span the supplied sequence. Autograd can
+  retain intermediates across chunks; bounded inference workspace is not a
+  claim of constant training memory.
+- Causal local-window reference checks, B=2,H=2,N=31,d=16,chunk=5,
+  W=1,4,7,16: dense banded SDPA agreement within 2.39e-7.
+- All available parameters in small CPU singlet/hybrid backward runs receive
+  finite gradients. A separate cached-append/full-prefill backward comparison
+  at B=1,N=17,D=32,H=2,R=3,chunk=5 gives max input-gradient difference
+  6.55e-11 and max parameter-gradient difference 4.77e-7.
+- Hybrid use_cache=True, a supplied cache, and is_causal=False each raise
+  NotImplementedError as intended. No claim of implemented hybrid decoding.
+- Boundary CNF example returns dense [1,2,3,4], boundary [4,5], sparse [-5].
+  Adding an empty clause preserves it; exhaustive enumeration over all 32
+  assignments gives the same unsatisfiable count before/after recombining
+  returned clause lists. This is preservation, not an implemented #SAT engine.
+- The suite's zero-mean 16x16 five-point periodic Poisson residual test passes.
+- benchmark_rigorous.py exits cleanly on CPU with a CUDA-unavailable message.
+  No long sequence, giant dense tensor, GPU timing, or full model was run.
+- Built wheel AND sdist in a separate source copy. Installed the wheel without
+  reinstalling dependencies into the review environment; import from outside
+  the checkout resolves to installed tensorsat 0.2.0 with no Triton present.
+  This is not a fresh dependency-resolution/GPU-extra installation test.
+- Python compilation and git diff --check pass. Tracked working tree unchanged.
+  Remote was re-fetched before closeout; reviewed HEAD remained current.
+
+ROUND-2 ITEMS 1-17: FIXED / PARTIAL / OPEN
+1  FIXED ON CPU for inference rank-state append workspace. attention.py:113-141
+   now honors chunk_size. Causality and cache partition tests pass.
+2  FIXED IN MODULE DISPATCH, GPU VALIDATION OPEN. attention.py:81-84 and
+   hybrid.py:87-96 choose differentiable einsum when gradients are needed.
+   This avoids the raw-kernel training break; it does not add a Triton backward.
+3  PARTIAL. triton_kernel.py:113-114 returns input dtype, addressing the old
+   forced-FP32-output mismatch. CUDA/autocast and mixed-input dtype tests remain.
+4  PARTIAL. Positions are now formed in FP32 and the original 70,000-position
+   FP16 case works. Casting the denominator back to FP16 creates another failure
+   at much larger positions. Remaining item 2.
+5  FIXED BY EXPLICIT REJECTION. hybrid.py:144-148 no longer silently ignores
+   caches. Incremental hybrid support itself is still deliberately unavailable.
+6  OPEN. Hybrid model behavior still depends on chunk_size. Remaining item 1.
+7  FIXED BY EXPLICIT REJECTION. hybrid.py:60-64 disallows noncausal mode.
+8  PARTIAL. Empty, multiline and same-line zero-delimited clauses now parse
+   correctly. Header/count/bounds/termination validation is absent. Item 5.
+9  FIXED for clause preservation in the returned partition. All clauses are
+   returned once in sparse/dense/boundary categories in the tested examples.
+   This should not be confused with independent solver-ready components.
+10 PARTIAL. Inference mode, SDPA memory column and OOM-as-N/A have landed.
+   Backend identification, workload alignment, hybrid memory and trial logs
+   remain. Item 6.
+11 PARTIAL. Measured/projection labels and accumulator arithmetic are improved;
+   new measured values cite the new runner. Raw logs and defensible memory/
+   timing projection assumptions remain absent. Item 7.
+12 PARTIAL. Absolute-error wording is softened but still lacks a defined domain
+   and atol/rtol contract; the new 1e-7 scale is exceeded in a small test. Item 8.
+13 PARTIAL. README labels the adapter experimental and corrects the MLP type.
+   API-level checkpoint claims and unvalidated recall claims remain. Item 9.
+14 PARTIAL. The periodic Poisson residual is now in the suite. Solver attribution,
+   zero-mode policy and dense scaling/guards are unchanged. Item 10.
+15 PARTIAL. FP32 inner variance fixes the finite FP16=300 example. It does not
+   protect all supported amplitudes/dtypes or unnormalized accumulation. Item 3.
+16 PARTIAL. Exhaustive production algebra, imported benchmark evaluator, Poisson
+   residual, DIMACS/boundary and selected numerical regressions are added.
+   GPU reporting and several regression oracles are still inadequate. Item 11.
+17 MOSTLY FIXED. Stale dist/0.1.0 tree entries are removed; new benchmark is listed;
+   package versions agree at 0.2.0; CPU wheel/sdist build and import pass.
+   Canonical installation/release evidence remains a smaller hygiene item. Item 14.
+
+NUMBERED REMAINING WORK - PASTE-READY
+These are the remaining tasks, not instructions to repeat already fixed work.
+Each entry separates reproduced behavior, static risk and unrun validation.
+
+HIGH
+1. Separate hybrid recurrence semantics from computational chunk_size.
+   Location: tensorsat/hybrid.py:168-192; tensorsat/stabilizer.py:60-75.
+   Evidence: REPRODUCED CPU, unchanged from round 2. Seed 1701 following the
+   deterministic cache/window checks; B=1,N=41,D=32,H=2,R=3,W=8. Same weights
+   and input, chunk_size 8 versus 16: max output difference 0.00583517.
+   Prior state is RMS-normalized at block boundaries, but current-block state is
+   not. The update gamma^C*old + sum(new) also omits the per-token decay weights
+   required by repeated gamma*state + token updates. Token position within a
+   memory block therefore changes the numerical operator.
+   Required: define the intended recurrence first. If chunk_size is a workspace
+   knob, implement one reference recurrence and partition-equivalence tests.
+   If it intentionally changes the model, name/document it as a model parameter
+   and retain a separate performance/workspace chunk setting. Do not simply
+   loosen tolerances until the discrepancy disappears.
+
+2. Keep the normalization denominator in higher precision through division.
+   Location: tensorsat/attention.py:135-138,185-186;
+   tensorsat/hybrid.py:187-188. Compare attention.py:145-146.
+   Evidence: REPRODUCED CPU. The original 70,000-position bug IS fixed. However,
+   pos_norm.to(out_chunk.dtype) can overflow again after the FP32 square root.
+   Tiny deterministic reproduction, no long allocation:
+     - SingletAttention D=64,H=1,R=1,chunk=2,use_triton=False, FP16.
+     - Set all parameters to zero, q_proj/out_proj weights to identity,
+       singlet_u to ones. k/v remain zero, including biases.
+     - Synthetic cache seq_len=70,000,000; cached_kv_context=ones(1,1,1,64).
+     - Input ones(1,N,64), evaluated separately with fresh identical caches.
+   N=1 returns 0.00095606 per output coordinate, near reference 0.00095618.
+   N=2 returns exactly zero for the first token because its tensor denominator
+   exceeds 65,504 and is cast to FP16 Inf. This is another append-partition
+   inconsistency, not evidence from processing 70 million tokens.
+   Required: divide in the declared accumulation precision, then cast the result;
+   test synthetic offsets near denominator overflow and compare one-token versus
+   multi-token append, including zero output bias. Audit prefill and hybrid paths
+   sharing the same cast pattern. Use integer offsets with a stated float policy.
+
+3. Finish the stabilizer/state dtype and amplitude policy; fix the new FP64 cast regression.
+   Location: tensorsat/stabilizer.py:31-40,71-75;
+   tensorsat/hybrid.py:176-192; README.md:119-122.
+   Evidence: REPRODUCED CPU.
+     a. FP16 StateRMSNorm on constant 300 now returns ones: fixed.
+     b. Constant finite 1e20 BF16 or FP32 states return all zeros because the
+        FP32 square overflows. These are adversarial finite amplitudes, not
+        measured normal training activations.
+     c. StateRMSNorm.double() on finite constant 1e40 now returns NaN because
+        unconditional state.float() first converts finite FP64 input to Inf.
+        The prior FP64 arithmetic could normalize this case. This is a newly
+        introduced dtype-range regression, not a scientific contractor failure.
+     d. Hybrid FP16 still overflows before state normalization: D=32,H=2,R=3,
+        W=8,chunk=16; identity q/k/v/out weights, singlet bases all ones,
+        input (1,41,32) all 10. Inputs/parameters are finite but output is not.
+        The same setup at input amplitude 1 stays finite. This is a controlled
+        stress test, not a claim about trained parameter statistics.
+   Required: define supported dtypes/amplitude bounds and accumulation/output
+   dtypes. Use overflow-resistant norm evaluation and do not downcast FP64
+   implicitly. Protect product, prefix sum, running-state and query-state
+   multiplication before casting. Test finite adversarial values and report
+   unsupported ranges clearly. State RMS normalization after overflow cannot
+   reconstruct lost information. Remove universal FP8/billion-token/zero-
+   overflow guarantees from source/README until the actual path meets them.
+
+4. Close GPU projection, autocast and dispatch gates with real CUDA tests.
+   Location: tensorsat/triton_kernel.py:56-68,81-114;
+   tensorsat/attention.py:81-84; tensorsat/hybrid.py:87-96;
+   test_tensorsat.py:42-55,125-130.
+   Evidence: STATIC RISK / UNRUN HARDWARE GATE, not a reproduced CUDA failure.
+   The output cast and training fallback are genuine improvements. A remaining
+   integration case is autocast: q_proj can produce BF16/FP16 while learned
+   basis Parameters remain FP32. The raw kernel loads Q and U without aligning
+   their operand dtypes before tl.dot. An output cast alone does not settle
+   mixed-input semantics. CPU einsum/autocast behavior is not proof of the kernel.
+   Required CUDA matrix:
+     - FP32, FP16, BF16; autocast on/off; train/eval plus grad/no_grad/inference.
+     - Contiguous/transposed inputs, non-tile dimensions, R below/above 16.
+     - Assert actual selected backend, operand/accumulator/output dtypes,
+       finite outputs and reference atol/rtol.
+     - Compare training fallback input/basis/q_proj/k_proj gradients with an
+       independent differentiable reference. Confirm raw kernel is not selected
+       when gradients are needed. Direct raw-kernel backward remains unsupported.
+   Keep the existing input_precision="ieee" flag. It was already present before
+   round 2 and is not an outstanding missing-flag task.
+
+MEDIUM
+5. Validate the DIMACS header and token stream, not just clause separation.
+   Location: tensorsat/cnf_preprocessor.py:16-45,52-59.
+   Evidence: REPRODUCED CPU. These malformed inputs are silently accepted:
+     - p cnf 1 2 followed by one terminated clause: count mismatch ignored.
+     - p cnf 1 1 followed by literal 2: declared variable bound ignored.
+     - p cnf 1 1 followed by literal 1 without 0: unterminated clause accepted.
+   A clause [1,2] with n_vars=1 later raises KeyError(2) in graph extraction.
+   Required: enforce one valid header, nonnegative declared counts, variable
+   bounds, clause count and terminal zeros. If permissive parsing is intentional,
+   make it explicit and provide a strict default for solver input. Raise clear
+   parse errors before graph construction. Preserve empty clauses and the newly
+   fixed multiline/multi-clause behavior; verify tiny formula counts.
+
+6. Finish fair and reproducible head-to-head benchmark methodology.
+   Location: benchmark_rigorous.py:28-38,51-66,85-89,103-139;
+   benchmark_comprehensive.py:26-46; benchmark_production.py:26-46.
+   Evidence: STATIC; GPU measurements were not run here.
+   Fixed: scaling now uses inference_mode; SDPA memory is printed; SDPA OOM
+   no longer becomes an infinite measured speedup.
+   Remaining: actual selected SDPA backend/version is not logged; StandardMHA
+   uses bias=False while SingletAttention uses biased projections; all three
+   models remain resident; hybrid has no separate peak reset/report; only one
+   aggregate timing batch is returned with no independent trial spread. Large
+   sequence lists are hardcoded and singlet/hybrid OOM is not handled per method.
+   Older scripts retain single-shot timing and previous output references can
+   remain live while a later result is computed, confusing memory boundaries.
+   Required: controlled, disclosed workload/projection costs, actual backend and
+   package/device metadata, per-method baseline/absolute/incremental memory,
+   hybrid memory, configurable safe limits, bounded warmup, multiple independent
+   trials with spread, explicit OOM statuses and raw machine-readable results.
+   Report comparisons as different operators unless quality equivalence is shown.
+
+7. Publish benchmark evidence and complete the projection resource model.
+   Location: README.md:47-78,80-91; benchmark_rigorous.py:69-139.
+   Evidence: SOURCE GAP, not an allegation of fabricated measurements. README
+   now gives new empirical rows and cites the matching runner, but no committed
+   run log/config/commit/backend record establishes the numbers. The statement
+   that all benchmarks were executed still conflicts with projected rows.
+   The million-token ~6.1 GB figure is labelled Q/K/V allocation, an improvement,
+   but must not be read as peak feasibility. At B=1,N=1,000,000,D=512,FP32:
+     Q/K/V payload = 6,144,000,000 bytes;
+     caller-held x = 2,048,000,000 bytes;
+     subtotal = 8,192,000,000 bytes before output, features and workspace.
+   This is arithmetic over tensor sizes, NOT measured peak memory. The
+   chunked-append fix removes the old full-N rank-state temporary; it does not
+   make a full-sequence call an input-streaming API. The 32 KiB across eight
+   default heads is ONE FP32 accumulator, not total streamed model memory.
+   Macro softmax time/memory and the 100k/131k streaming rows lack a concrete
+   implementation, byte boundary and reproducible extrapolation equations.
+   Required: save actual logs for measured rows; state equations/assumptions and
+   rounding for projections; include buffers, I/O and supported streaming path;
+   use consistent GB/GiB units. Do not infer softmax peak memory from pair count.
+   Cached layer calls/second are not full-model generated tokens/second. The
+   code produces representations, not sampled language-model tokens.
+
+8. Define numerical contracts instead of replacing one absolute threshold with another.
+   Location: README.md:40-43,96-102; test_tensorsat.py:79-97,132-142;
+   benchmark_comprehensive.py:96-99.
+   Evidence: REPRODUCED CPU. Seed 1701, B=2,N=37,D=64,H=4,R=5,chunk=7,
+   random inputs multiplied by 10: FP32 step/prefill max difference 7.38e-7,
+   exceeding the README's newly quoted 1e-7 scale. That is an ordinary numerical
+   result, not failure of exact integer uncrossing. The README qualifies input
+   dependence but supplies no domain or raw numerical dataset for its threshold.
+   The scientific table still calls distinct absolute errors machine epsilon;
+   machine epsilon is not the output error of a contraction.
+   Required: supported input scales, shapes, lengths and dtypes; reference
+   precision; atol+rtol and finite checks; deterministic multiple seeds. Separate
+   exact discrete coefficients from floating-point summation effects. Keep the
+   current successful integer and FP64/complex tests, with accurate descriptions.
+
+9. Align checkpoint/recall claims with implemented integration and quality evidence.
+   Location: tensorsat/adapter.py:2-9,20-25,63-105;
+   tensorsat/model_wrapper.py:6-9,24-39;
+   tensorsat/hybrid.py:2-9,29-35; README.md:108-117.
+   Evidence: STATIC / UNRUN MODEL-QUALITY GATE. The README now calls the adapter
+   experimental and correctly identifies the SiLU MLP. Source still describes
+   equivalent checkpoint translation and a Llama/Mistral drop-in block. There
+   is no checkpoint loader/converter or held-out model-quality run here; the
+   adapter is not wired into SingletAttention's forward implementation. Its
+   alignment loss DOES have a genuine causal SDPA target: do not withdraw that.
+   Q/K unit normalization removes magnitude, so unrestricted exact softmax
+   equivalence cannot follow merely from the adapter API. Exact local SDPA does
+   not guarantee entity recall after learned mixing or solve remote retrieval.
+   Required: accurate experimental scope; concrete integration path and supported
+   checkpoint architecture; held-out distillation, perplexity/retrieval/context
+   evaluations and complete-model generation measurements. Keep this separate
+   from the parallel research paper's singlet-contribution experiment.
+
+10. Describe scientific algorithms accurately and preflight dense allocations.
+    Location: tensorsat/scientific.py:1-6,22-40,65-95;
+    tensorsat/uncrossing.py:52-68; README.md:14-16,259-265.
+    Evidence: STATIC plus passing small discrete/periodic numerical tests.
+    The Poisson routine is a 2D periodic FFT solve with a five-point discrete
+    symbol; it does not invoke singlet slices. 3D/covariance support is not
+    implemented. Nonzero-mean RHS has its incompatible mean silently removed.
+    Contractor/generator still materialize (n_bits+1)*16^n_bits coefficients;
+    there are no allocation/time guards. For example n_bits=7,FP64 payload is
+    8*16^7*8 = 17,179,869,184 bytes, excluding overhead; not allocated here.
+    The exact swap contraction also has a direct O(dim^2) oracle, while this
+    prototype materializes four-index slices. Correct algebra is not by itself
+    a demonstrated acceleration of that operation or of a neural layer.
+    Required: accurate algorithm/docstrings, 2D scope, explicit mean/gauge policy,
+    analytic residual tests, resource caps before allocation, and comparisons
+    against the direct swap contraction. Acknowledge which mathematical claims
+    rely on external formal results versus tests run by this Python project;
+    no Lean proof build or external axiom audit was performed in this review.
+
+11. Make automated gate reporting and regression oracles trustworthy.
+    Location: test_tensorsat.py:3,42-55,85-97,132-142,261-294,313-326.
+    Evidence: SOURCE. There is real progress: production exhaustive algebra,
+    Poisson residual, boundary/streaming parser and FP16 RMS tests were added.
+    Still, GPU unavailability returns normally and is counted as a pass; direct
+    execution prints a universal gate-success banner without running GPU work.
+    The header still says 4,384 where the actual algebra count is 4,368.
+    The long-position test checks only that final output is not all zero, but
+    out_proj has a nonzero bias: a zero attention contribution can still pass.
+    Cache tests use N=8/default internal chunk=512, so they do not exercise
+    the newly fixed internal append loop across chunk_size boundaries. Hybrid
+    forward with grads enabled uses the safe fallback, not the raw GPU kernel.
+    Required: pytest skip markers and separate CPU/GPU CI outcomes; explicit
+    backend assertions; deterministic multi-partition/future-perturbation tests;
+    test attention contribution with bias removed against a precision reference;
+    use append N>internal chunk_size and cover new numerical cases above.
+    Report test passes separately from unrun hardware and model-quality gates.
+
+LOW / API AND RELEASE HYGIENE
+12. Resolve cache creation behavior instead of silently discarding cache intent.
+    Location: tensorsat/attention.py:86-106,194-195;
+    tensorsat/model_wrapper.py:42-58.
+    Evidence: REPRODUCED CPU. Calling layer(x,use_cache=True) without constructing
+    KVCache returns None for the cache and runs the noncached path. The wrapper
+    passes the same behavior through. The explicit-cache README example works.
+    Required: choose one contract: allocate/return a cache automatically, or raise
+    a useful error requiring a supplied cache. Document it and test both layer
+    and block. Preserve explicit-cache behavior already verified above.
+
+13. Add constructor/graph input validation for the public prototype APIs.
+    Location: tensorsat/attention.py:62-71,166-167;
+    tensorsat/hybrid.py:50-64,116-119;
+    tensorsat/cnf_preprocessor.py:52-59,80-98;
+    tensorsat/stabilizer.py:50-55.
+    Evidence: STATIC invalid-configuration risks plus a reproduced graph defect.
+    Positive chunk/window sizes and meaningful head/rank/dimension ranges are not
+    consistently checked. Negative chunk sizes can skip loops leaving empty-
+    allocated output data unwritten; zero step sizes fail deep in range().
+    Invalid base_decay reaches log/division errors rather than a clear contract.
+    A valid repeated literal also creates a self-loop: CNFFormula(3,[[1,1,2,3]])
+    gives vertex 1 the neighbor 1, inflating the density heuristic. Cluster
+    construction may overlap existing clusters; returned variable sets should
+    not be assumed independent solver components without boundary accounting.
+    Required: clear ValueError checks; deduplicate absolute variables per clause
+    before constructing a simple primal graph; test duplicate/tautological
+    literals and overlapping dense neighborhoods. Keep original clauses intact
+    and document whether graph clusters may overlap. Clause preservation fixed
+    in this patch must not regress.
+
+14. Finish small release/documentation details without reopening fixed package work.
+    Location: README.md:129-170,269-272; pyproject.toml:1-31;
+    tensorsat/__init__.py:15; repository release files.
+    Evidence: SOURCE / PARTLY VALIDATED. Version 0.2.0, CPU wheel/sdist creation,
+    installed import without Triton and README code-map updates are good.
+    README still uses a different GitLab clone route/tree prefix from the supplied
+    GitHub repository. No claim is made here that the GitLab address is broken;
+    it was not independently checked. Apache-2.0 is declared, but the tracked
+    tree has no LICENSE text. Build emits legacy-license-metadata warnings.
+    Required: document/validate the canonical source route, include the intended
+    license text, and add clean wheel/sdist installation smoke tests for supported
+    CPU environments plus the GPU extra on a compatible runner. Label archived
+    review reports historical and keep current corrections/status easy to find.
+
+VALIDATION GATES
+G1 OPEN HARDWARE: CUDA projection/stride/shape correctness, FP16/BF16/autocast,
+   inference dispatch, differentiable fallback and hybrid GPU execution.
+G2 PARTIAL: corrected inference/OOM/memory-column methodology. Actual backend,
+   complete memory/trial metadata, logs and projection assumptions remain open.
+G3 CLOSED ON CPU: original causal append and full-N rank-state temporary bugs.
+   Preserve across chunk partitions. Larger-position normalization is separate.
+G4 CLOSED ON CPU: causal local-window reference behavior. Unsupported hybrid
+   cache/noncausal modes now reject clearly. Hybrid global chunk semantics OPEN.
+G5 OPEN: checkpoint integration, held-out quality and full-model performance.
+G6 PARTIAL: FP16 state=300 and original 70,000-position cases fixed. Finite
+   amplitude, FP64 cast regression and larger-position normalization remain OPEN.
+G7 PARTIAL: valid DIMACS streaming/clauses and 2D zero-mean Poisson residual pass.
+   Strict parser validation, solver scope and allocation guards remain OPEN.
+G8 PARTIAL RELEASE: CPU wheel/sdist build and no-Triton import pass; clean full
+   dependency matrix/GPU-extra installation and release metadata remain OPEN.
+
+DO-NOT-TOUCH / IMPLEMENTATION CONSTRAINTS
+- Do not rewrite the discrete identity to satisfy performance narratives. Keep
+  s_factor/eval_slice_A and passing production-contraction checks intact unless
+  a separate, independently verified mathematical change is proposed.
+- Preserve causal cached appends, bounded inference prefix workspace and the
+  correct causal banded local window.
+- Do not restore silent hybrid cache/noncausal handling. Explicit unsupported
+  errors are a valid resolution until those features are implemented and tested.
+- Do not fabricate or backfill benchmark evidence. Keep measured/projection,
+  component/full-model and tensor-size/peak-memory distinctions explicit.
+- Do not reintroduce withdrawn round-1 findings: the IEEE precision flag already
+  existed; default state is 4 KiB/head, not 16 KB/head; the adapter loss uses a real
+  SDPA target; short dtype tests already checked both NaN and Inf.
+- Do not treat CPU fallback gradients or tests counted as passes as GPU evidence.
+- No large allocation was needed for the reproduced numerical failures. Keep
+  future tests bounded and preflight memory before heavy configurations.
+
+PRIMARY SOURCE LINKS OBSERVED FOR THIS HEAD
+https://github.com/Stratum-Research-Group/TensorSAT/commit/8e0ea90a2ebc49c42316c0023fba5be3b2d4113d
+https://github.com/Stratum-Research-Group/TensorSAT/blob/8e0ea90a2ebc49c42316c0023fba5be3b2d4113d/tensorsat/attention.py
+https://github.com/Stratum-Research-Group/TensorSAT/blob/8e0ea90a2ebc49c42316c0023fba5be3b2d4113d/tensorsat/hybrid.py
+https://github.com/Stratum-Research-Group/TensorSAT/blob/8e0ea90a2ebc49c42316c0023fba5be3b2d4113d/tensorsat/stabilizer.py
+https://github.com/Stratum-Research-Group/TensorSAT/blob/8e0ea90a2ebc49c42316c0023fba5be3b2d4113d/tensorsat/triton_kernel.py
+https://github.com/Stratum-Research-Group/TensorSAT/blob/8e0ea90a2ebc49c42316c0023fba5be3b2d4113d/tensorsat/cnf_preprocessor.py
+https://github.com/Stratum-Research-Group/TensorSAT/blob/8e0ea90a2ebc49c42316c0023fba5be3b2d4113d/tensorsat/scientific.py
+https://github.com/Stratum-Research-Group/TensorSAT/blob/8e0ea90a2ebc49c42316c0023fba5be3b2d4113d/tensorsat/uncrossing.py
+https://github.com/Stratum-Research-Group/TensorSAT/blob/8e0ea90a2ebc49c42316c0023fba5be3b2d4113d/tensorsat/adapter.py
+https://github.com/Stratum-Research-Group/TensorSAT/blob/8e0ea90a2ebc49c42316c0023fba5be3b2d4113d/tensorsat/model_wrapper.py
+https://github.com/Stratum-Research-Group/TensorSAT/blob/8e0ea90a2ebc49c42316c0023fba5be3b2d4113d/benchmark_rigorous.py
+https://github.com/Stratum-Research-Group/TensorSAT/blob/8e0ea90a2ebc49c42316c0023fba5be3b2d4113d/benchmark_contraction.py
+https://github.com/Stratum-Research-Group/TensorSAT/blob/8e0ea90a2ebc49c42316c0023fba5be3b2d4113d/test_tensorsat.py
+https://github.com/Stratum-Research-Group/TensorSAT/blob/8e0ea90a2ebc49c42316c0023fba5be3b2d4113d/README.md

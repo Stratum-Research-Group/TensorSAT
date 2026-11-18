@@ -33,10 +33,19 @@ class StateRMSNorm(nn.Module):
         state: shape (B, H, R, d)
         returns normalized state of same shape
         """
-        # Compute variance in FP32 to prevent mantissa overflow in FP16 / BF16
-        state_fp32 = state.float()
-        variance = torch.mean(state_fp32**2, dim=(-2, -1), keepdim=True)
-        normed = (state_fp32 * torch.rsqrt(variance + self.eps)).to(state.dtype)
+        # Preserve FP64 precision if provided; upcast FP16 / BF16 to FP32 to prevent mantissa overflow
+        calc_dtype = torch.float64 if state.dtype == torch.float64 else torch.float32
+        state_calc = state.to(calc_dtype)
+
+        # Scale down large state magnitudes if needed to prevent square overflow in float32 / float64
+        max_val = torch.amax(torch.abs(state_calc), dim=(-2, -1), keepdim=True)
+        # Avoid division by zero
+        scale = torch.clamp(max_val, min=1.0)
+        state_scaled = state_calc / scale
+
+        variance_scaled = torch.mean(state_scaled**2, dim=(-2, -1), keepdim=True)
+        rms = torch.sqrt(variance_scaled + (self.eps / (scale**2))) * scale
+        normed = (state_calc / rms).to(state.dtype)
         return normed * self.scale
 
 
@@ -49,6 +58,8 @@ class DecayStabilizer(nn.Module):
 
     def __init__(self, num_heads: int, base_decay: float = 0.999) -> None:
         super().__init__()
+        assert num_heads > 0, "num_heads must be positive"
+        assert 0.0 < base_decay < 1.0, "base_decay must be in (0, 1)"
         self.num_heads = num_heads
         # Parameterized in logit space to keep gamma in (0, 1)
         init_logit = math.log(base_decay / (1.0 - base_decay))
